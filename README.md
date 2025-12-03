@@ -49,7 +49,7 @@ Makine öğrenmesi kullanarak anomali ve saldırı tespit sistemi geliştirmek.
 ---
 
 ## **Dahil Verisetleri**
-1. NSL-KDD  
+1. TON-IOT 
 2. UNSW-NB15  
 3. CICIDS2017  
 
