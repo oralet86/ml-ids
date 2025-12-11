@@ -20,8 +20,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from torch.utils.data import DataLoader, TensorDataset
-from utils import TON_IOT_PATH, HYPERPARAMS_DIR, RESULTS_DIR, logger
-from artifical_neural_network import ArtificialNeuralNetwork
+from utils import TON_IOT_PATH, HYPERPARAMS_DIR, RESULTS_DIR, MODEL_LIST, logger
 
 VAR_THRESHOLD = 1e-5
 RF_ESTIMATORS = 50
@@ -377,10 +376,33 @@ def tune_ton_iot_ml(
     return save_results(study, model_name, n_trials, n_splits, time.time() - start_time)
 
 
+def tune_ton_iot(
+    model_class: Type[Any], n_trials: int, n_splits: int, random_state: int
+) -> Dict[str, Any]:
+    """
+    Automatically routes the model to the correct tuning function (DL vs ML)
+    based on its base class.
+    """
+    if issubclass(model_class, BaseDLModel):
+        logger.info(f"Detected Deep Learning model: {model_class.__name__}")
+        return tune_ton_iot_dl(model_class, n_trials, n_splits, random_state)
+
+    elif issubclass(model_class, BaseMLModel):
+        logger.info(f"Detected ML model: {model_class.__name__}")
+        return tune_ton_iot_ml(model_class, n_trials, n_splits, random_state)
+
+    else:
+        raise ValueError(
+            f"Model class {model_class.__name__} must inherit from "
+            "BaseDLModel or BaseMLModel."
+        )
+
+
 if __name__ == "__main__":
-    tune_ton_iot_dl(
-        model_class=ArtificialNeuralNetwork,
-        n_trials=N_TRIALS,
-        n_splits=N_SPLITS,
-        random_state=RANDOM_STATE,
-    )
+    for model in MODEL_LIST:
+        tune_ton_iot(
+            model_class=model,
+            n_trials=N_TRIALS,
+            n_splits=N_SPLITS,
+            random_state=RANDOM_STATE,
+        )
