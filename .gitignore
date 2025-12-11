@@ -1,6 +1,6 @@
 # dataset folder (hundreds of mbs, probably not suitable for git)
 datasets
-hyperparameters
+hyperparams
 models
 
 # Byte-compiled / optimized / DLL files
