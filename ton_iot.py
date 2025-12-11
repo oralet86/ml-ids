@@ -16,7 +16,7 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.feature_selection import SelectFromModel, VarianceThreshold
 from imblearn.over_sampling import SMOTE
 from sklearn.impute import SimpleImputer
-from sklearn.model_selection import TimeSeriesSplit
+from sklearn.model_selection import StratifiedKFold
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from torch.utils.data import DataLoader, TensorDataset
@@ -31,7 +31,7 @@ PATIENCE = 5
 MOMENTUM = 0.9
 
 # SEARCH PARAMETERS
-N_TRIALS = 50
+N_TRIALS = 3
 N_SPLITS = 5
 RANDOM_STATE = 42
 
@@ -70,6 +70,8 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         "http_user_agent",
         "ssl_subject",
         "ssl_issuer",
+        "type",
+        "attack_cat",
     ]
 
     existing_cols = [c for c in cols_to_drop if c in df.columns]
@@ -234,10 +236,12 @@ def tune_ton_iot_dl(
         lr = hp.pop("lr")
         optimizer_name = hp.pop("optimizer_name")
 
-        tscv = TimeSeriesSplit(n_splits=n_splits)
+        skf = StratifiedKFold(
+            n_splits=n_splits, shuffle=True, random_state=random_state
+        )
         metrics_lists = {"f1": [], "acc": [], "prec": [], "rec": []}
 
-        for fold, (train_idx, val_idx) in enumerate(tscv.split(X, y)):
+        for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
             # Use Helper for all data processing
             X_tr, y_tr, X_val, y_val = process_fold_data(
                 X.iloc[train_idx],
@@ -247,6 +251,12 @@ def tune_ton_iot_dl(
                 get_pipeline(num_cols, cat_cols),
                 random_state,
             )
+
+            if len(np.unique(y_tr)) < 2:
+                logger.warning(
+                    f"Trial {trial.number}, Fold {fold}: Training set contains only 1 class. Skipping fold."
+                )
+                continue
 
             # DL Specific: Tensors & Loaders
             train_loader = DataLoader(
@@ -287,6 +297,9 @@ def tune_ton_iot_dl(
             trial.report(m["f1"], fold)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
+
+        if not metrics_lists["f1"]:
+            return 0.0
 
         trial.set_user_attr("avg_accuracy", np.mean(metrics_lists["acc"]))
         trial.set_user_attr("avg_precision", np.mean(metrics_lists["prec"]))
@@ -330,10 +343,12 @@ def tune_ton_iot_ml(
     def objective(trial: optuna.Trial) -> float:
         hp = model_class.sample_hyperparameters(trial)
 
-        tscv = TimeSeriesSplit(n_splits=n_splits)
+        skf = StratifiedKFold(
+            n_splits=n_splits, shuffle=True, random_state=random_state
+        )
         metrics_lists = {"f1": [], "acc": [], "prec": [], "rec": []}
 
-        for fold, (train_idx, val_idx) in enumerate(tscv.split(X, y)):
+        for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
             # Use Helper for all data processing
             X_tr, y_tr, X_val, y_val = process_fold_data(
                 X.iloc[train_idx],
@@ -344,7 +359,12 @@ def tune_ton_iot_ml(
                 random_state,
             )
 
-            # ML Specific: Init & Train (Fit/Predict is wrapped in train_model)
+            if len(np.unique(y_tr)) < 2:
+                logger.warning(
+                    f"Trial {trial.number}, Fold {fold}: Training set contains only 1 class. Skipping fold."
+                )
+                continue
+
             model = model_class(**hp)
 
             # BaseMLModel.train_model expects raw arrays
@@ -358,6 +378,9 @@ def tune_ton_iot_ml(
             trial.report(m["f1"], fold)
             if trial.should_prune():
                 raise optuna.exceptions.TrialPruned()
+
+        if not metrics_lists["f1"]:
+            return 0.0
 
         trial.set_user_attr("avg_accuracy", np.mean(metrics_lists["acc"]))
         trial.set_user_attr("avg_precision", np.mean(metrics_lists["prec"]))
