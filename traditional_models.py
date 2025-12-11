@@ -1,5 +1,7 @@
 from typing import Dict, Any
+import warnings
 import optuna
+import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
 from base_models_abc import BaseMLModel, ArrayLike
@@ -75,7 +77,6 @@ class XGBoostModel(BaseMLModel):
             "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
             "n_jobs": -1,
             "random_state": 42,
-            "use_label_encoder": False,
             "eval_metric": "logloss",
         }
 
@@ -133,8 +134,18 @@ class LightGBMModel(BaseMLModel):
         X_val: ArrayLike,
         y_val: ArrayLike,
     ) -> Dict[str, float]:
-        self.model.fit(X_train, y_train)
-        y_pred = self.model.predict(X_val)
+        X_train = np.ascontiguousarray(X_train)
+        X_val = np.ascontiguousarray(X_val)
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                category=UserWarning,
+                message=".*X does not have valid feature names.*",
+            )
+
+            self.model.fit(X_train, y_train)
+            y_pred = self.model.predict(X_val)
 
         return {
             "f1": float(f1_score(y_val, y_pred, average="binary", zero_division=0)),

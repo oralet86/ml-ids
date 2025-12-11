@@ -5,6 +5,7 @@ import sys
 import artifical_neural_network as ann
 import traditional_models as tm
 
+# Helper list to run evals in a loop
 MODEL_LIST = [
     ann.ArtificialNeuralNetwork,
     tm.RandomForestModel,
