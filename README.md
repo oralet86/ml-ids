@@ -129,17 +129,12 @@ Automatically finds the *Training* and *Testing* set files, merges them into one
 
 -----
 
-## **🧠 Models & Algorithms**
+## **🧠 Models**
 
-The project implements and benchmarks the following algorithms:
-
-### **Machine Learning (Shallow)**
+The project implements and benchmarks the following AI models:
 
 * **Random Forest:** Robust baseline for classification.
 * **XGBoost / LGBM / CatBoost:** Gradient boosting machines for high performance on tabular data.
 * **LS-SVM:** Least Squares Support Vector Machine for margin-based classification.
-
-### **Deep Learning**
-
 * **MLP (Multi-Layer Perceptron):** Standard dense neural networks.
 * **CNN-LSTM:** A hybrid model using Convolutional layers for feature extraction and LSTM for temporal/sequence dependency analysis.
