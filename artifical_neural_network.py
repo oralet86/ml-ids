@@ -4,8 +4,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
-from utils import DEVICE
 from base_models_abc import BaseDLModel
+
+DEVICE = torch.device(
+    "mps"
+    if torch.backends.mps.is_available()
+    else ("cuda" if torch.cuda.is_available() else "cpu")
+)
 
 
 class ArtificialNeuralNetwork(BaseDLModel):

@@ -2,13 +2,16 @@ import pathlib
 import logging
 import os
 import sys
-import torch
+import artifical_neural_network as ann
+import traditional_models as tm
 
-DEVICE = torch.device(
-    "mps"
-    if torch.backends.mps.is_available()
-    else ("cuda" if torch.cuda.is_available() else "cpu")
-)
+MODEL_LIST = [
+    ann.ArtificialNeuralNetwork,
+    tm.RandomForestModel,
+    tm.XGBoostModel,
+    tm.LightGBMModel,
+    tm.CatBoostModel,
+]
 
 # PATHS
 """
