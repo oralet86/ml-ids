@@ -20,7 +20,14 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from torch.utils.data import DataLoader, TensorDataset
-from utils import TON_IOT_PATH, HYPERPARAMS_DIR, RESULTS_DIR, MODEL_LIST, logger
+from utils import (
+    TON_IOT_PATH,
+    HYPERPARAMS_DIR,
+    RESULTS_DIR,
+    MODEL_LIST,
+    logger,
+)
+from params import N_TRIALS, N_SPLITS, RANDOM_STATE
 
 VAR_THRESHOLD = 1e-5
 RF_ESTIMATORS = 50
@@ -29,11 +36,6 @@ BATCH_SIZE = 4096
 EPOCHS = 100
 PATIENCE = 5
 MOMENTUM = 0.9
-
-# SEARCH PARAMETERS
-N_TRIALS = 3
-N_SPLITS = 5
-RANDOM_STATE = 42
 
 
 def get_toniot() -> pd.DataFrame:
