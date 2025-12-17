@@ -20,6 +20,19 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from torch.utils.data import DataLoader, TensorDataset
+from params import (
+    N_TRIALS,
+    N_SPLITS,
+    RANDOM_STATE,
+    BATCH_SIZE,
+    MOMENTUM,
+    EPOCHS,
+    PATIENCE,
+    VAR_THRESHOLD,
+    GINI_N_ESTIMATORS,
+    TOP_K_FEATURES,
+    SMOTE_K_NEIGHBORS,
+)
 from utils import (
     TON_IOT_PATH,
     HYPERPARAMS_DIR,
@@ -27,15 +40,6 @@ from utils import (
     MODEL_LIST,
     logger,
 )
-from params import N_TRIALS, N_SPLITS, RANDOM_STATE
-
-VAR_THRESHOLD = 1e-5
-RF_ESTIMATORS = 50
-MAX_FEATURES = 20
-BATCH_SIZE = 4096
-EPOCHS = 100
-PATIENCE = 5
-MOMENTUM = 0.9
 
 
 def get_toniot() -> pd.DataFrame:
@@ -125,23 +129,23 @@ def process_fold_data(
     if len(np.unique(y_tr)) > 1:
         selector = SelectFromModel(
             estimator=RandomForestClassifier(
-                n_estimators=RF_ESTIMATORS, random_state=random_state, n_jobs=-1
+                n_estimators=GINI_N_ESTIMATORS, random_state=random_state, n_jobs=-1
             ),
-            max_features=MAX_FEATURES,
+            max_features=TOP_K_FEATURES,
             threshold=-np.inf,
         )
         X_tr_selected = selector.fit_transform(X_tr_filtered, y_tr)
         X_val_selected = selector.transform(X_val_filtered)
     else:
-        if X_tr_filtered.shape[1] > MAX_FEATURES:
-            X_tr_selected = X_tr_filtered[:, :MAX_FEATURES]
-            X_val_selected = X_val_filtered[:, :MAX_FEATURES]
+        if X_tr_filtered.shape[1] > TOP_K_FEATURES:
+            X_tr_selected = X_tr_filtered[:, :TOP_K_FEATURES]
+            X_val_selected = X_val_filtered[:, :TOP_K_FEATURES]
         else:
             X_tr_selected = X_tr_filtered
             X_val_selected = X_val_filtered
 
     if len(np.unique(y_tr)) > 1:
-        smote = SMOTE(random_state=random_state)
+        smote = SMOTE(random_state=random_state, k_neighbors=SMOTE_K_NEIGHBORS)
         X_tr_res, y_tr_res = smote.fit_resample(X_tr_selected, y_tr)
     else:
         X_tr_res, y_tr_res = X_tr_selected, y_tr

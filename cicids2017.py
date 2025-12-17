@@ -19,7 +19,19 @@ from sklearn.preprocessing import MinMaxScaler
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 from base_models_abc import ArrayLike, BaseDLModel, BaseMLModel
-from params import N_TRIALS, RANDOM_STATE, TEST_SIZE, VAL_IN_TRAIN
+from params import (
+    N_TRIALS,
+    RANDOM_STATE,
+    TEST_SIZE,
+    VAL_IN_TRAIN,
+    BATCH_SIZE,
+    MOMENTUM,
+    EPOCHS,
+    PATIENCE,
+    GINI_N_ESTIMATORS,
+    TOP_K_FEATURES,
+    SMOTE_K_NEIGHBORS,
+)
 from utils import (
     CICIDS2017_PATH,
     HYPERPARAMS_DIR,
@@ -27,17 +39,6 @@ from utils import (
     RESULTS_DIR,
     logger,
 )
-
-# --- Constants ---
-BATCH_SIZE = 4096
-EPOCHS = 100
-PATIENCE = 5
-MOMENTUM = 0.9
-
-# Feature selection via Gini importance (train-only)
-GINI_N_ESTIMATORS = 50
-TOP_K_FEATURES = 20
-SMOTE_K_NEIGHBORS = 5
 
 
 def get_cicids2017() -> pd.DataFrame:
