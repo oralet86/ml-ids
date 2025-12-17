@@ -9,14 +9,14 @@ import traditional_models as tm
 
 # Helper list to run evals in a loop
 MODEL_LIST = [
-    ArtificialNeuralNetwork,
-    LSTMModel,
-    CNNLSTMModel,
     tm.RandomForestModel,
     tm.XGBoostModel,
     tm.LightGBMModel,
     tm.CatBoostModel,
     tm.SVCModel,
+    ArtificialNeuralNetwork,
+    LSTMModel,
+    CNNLSTMModel,
 ]
 
 # PATHS
