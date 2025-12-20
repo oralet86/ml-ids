@@ -40,10 +40,17 @@ from utils import (
     logger,
 )
 
+# This determines how much of the total data will be used.
+# 0.25 Means %25 of the original data is picked via stratified sampling.
+# This is not in params.py since the value will be different for each dataset.
+DATA_PCT = 0.05
 
-def get_cicids2017() -> pd.DataFrame:
+
+def get_cicids2017(pct: float = DATA_PCT) -> pd.DataFrame:
     """
     Load the CICIDS2017 dataset from CSV files into a single DataFrame.
+
+    If pct < 1.0, returns a stratified sample on 'label' to preserve class ratios.
     """
     data_path = str(CICIDS2017_PATH / "*.csv")
     logger.info(f"Loading CICIDS2017 dataset from {data_path}")
@@ -57,10 +64,43 @@ def get_cicids2017() -> pd.DataFrame:
     start = time.time()
     for file in all_files:
         df = pd.read_csv(file, engine="pyarrow", dtype_backend="pyarrow")
-        df.columns = df.columns.str.strip()
+        df.columns = df.columns.astype(str).str.strip()
         df_list.append(df)
 
     combined_df = pd.concat(df_list, ignore_index=True)
+
+    if pct < 1.0:
+        if "Label" not in combined_df.columns:
+            raise ValueError(
+                "Stratified sampling requires 'Label' column, but it was not found."
+            )
+
+        total_len = len(combined_df)
+        target_n = max(1, int(round(total_len * pct)))
+
+        combined_df = (
+            combined_df.groupby("Label", group_keys=False)
+            .apply(
+                lambda g: g.sample(
+                    n=max(1, int(round(len(g) * pct))),
+                    replace=False,
+                    random_state=RANDOM_STATE,
+                )
+            )
+            .reset_index(drop=True)
+        )
+
+        # Correct any rounding drift
+        if len(combined_df) > target_n:
+            combined_df = combined_df.sample(
+                n=target_n, random_state=RANDOM_STATE
+            ).reset_index(drop=True)
+
+        logger.info(
+            f"Returning stratified sample on 'Label': "
+            f"{len(combined_df)}/{total_len} rows (pct={pct})"
+        )
+
     end = time.time()
     logger.info(f"Loaded {len(all_files)} files in {end - start:.2f} seconds")
     return combined_df

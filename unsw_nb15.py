@@ -37,6 +37,11 @@ from params import (
 )
 from utils import HYPERPARAMS_DIR, MODEL_LIST, RESULTS_DIR, UNSW_NB15_PATH, logger
 
+# This determines how much of the total data will be used.
+# 0.25 Means %25 of the original data is picked via stratified sampling.
+# This is not in params.py since the value will be different for each dataset.
+DATA_PCT = 0.5
+
 
 def _find_first_csv(pattern: str) -> os.PathLike:
     """Return first match under UNSW_NB15_PATH; raise FileNotFoundError if none."""
@@ -49,7 +54,7 @@ def _find_first_csv(pattern: str) -> os.PathLike:
     return matches[0]
 
 
-def get_unsw_nb15() -> pd.DataFrame:
+def get_unsw_nb15(pct: float = DATA_PCT) -> pd.DataFrame:
     """
     Load UNSW-NB15 training and testing CSVs and concatenate them.
     Looks for:
@@ -70,6 +75,37 @@ def get_unsw_nb15() -> pd.DataFrame:
     df_test.columns = df_test.columns.astype(str).str.strip()
 
     df = pd.concat([df_train, df_test], ignore_index=True)
+
+    if pct < 1.0:
+        if "label" not in df.columns:
+            raise ValueError(
+                "Stratified sampling requires 'label' column, but it was not found."
+            )
+
+        total_len = len(df)
+        target_n = max(1, int(round(total_len * pct)))
+
+        df = (
+            df.groupby("label", group_keys=False)
+            .apply(
+                lambda g: g.sample(
+                    n=max(1, int(round(len(g) * pct))),
+                    replace=False,
+                    random_state=RANDOM_STATE,
+                )
+            )
+            .reset_index(drop=True)
+        )
+
+        # Correct any rounding drift
+        if len(df) > target_n:
+            df = df.sample(n=target_n, random_state=RANDOM_STATE).reset_index(drop=True)
+
+        logger.info(
+            f"Returning stratified sample on 'label': "
+            f"{len(df)}/{total_len} rows (pct={pct})"
+        )
+
     logger.info(f"Loaded datasets in {time.time() - start:.2f} seconds")
     return df
 
@@ -87,7 +123,7 @@ def clean_data_unsw(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = df.columns.astype(str).str.strip()
 
-    df.replace([float("inf"), float("-inf")], pd.NA, inplace=True)
+    df.replace([float("inf"), float("-inf")], np.nan, inplace=True)
 
     placeholder_values = {
         "-",
@@ -106,7 +142,7 @@ def clean_data_unsw(df: pd.DataFrame) -> pd.DataFrame:
     ).columns.tolist()
     for c in obj_cols:
         s = df[c].astype("string")
-        df[c] = s.where(~s.isin(list(placeholder_values)), pd.NA)
+        df[c] = s.where(~s.isin(list(placeholder_values)), np.nan)
 
     before = len(df)
     df.drop_duplicates(inplace=True)
@@ -130,6 +166,35 @@ def preprocess_unsw_nb15(df: pd.DataFrame) -> pd.DataFrame:
     df = clean_data_unsw(df)
     logger.info(f"Completed preprocessing in {time.time() - start:.2f} seconds")
     return df
+
+
+def _to_sklearn_nan(
+    df: pd.DataFrame, num_cols: List[str], cat_cols: List[str]
+) -> pd.DataFrame:
+    """
+    Convert Arrow / pandas nullable dtypes into sklearn-friendly numpy/object dtypes.
+
+    - Numeric columns -> float64 with np.nan
+    - Categorical columns -> object with None for missing
+
+    This prevents: TypeError: boolean value of NA is ambiguous
+    """
+    out = df.copy()
+
+    # Numeric: force numpy float64 (np.nan for missing)
+    for c in num_cols:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").astype("float64")
+
+    # Categorical: force plain Python objects (None for missing)
+    for c in cat_cols:
+        if c in out.columns:
+            # Convert to object first (so missing can be represented sanely)
+            out[c] = out[c].astype("object")
+            # Replace pandas NA / NaN with None (SimpleImputer treats None as missing for object)
+            out[c] = out[c].where(pd.notna(out[c]), None)
+
+    return out
 
 
 def _chronological_split(
@@ -211,6 +276,9 @@ def process_holdout_data(
     - RF SelectFromModel top-K features
     - SMOTE on training only
     """
+    X_tr_raw = _to_sklearn_nan(X_tr_raw, num_cols=num_cols, cat_cols=cat_cols)
+    X_val_raw = _to_sklearn_nan(X_val_raw, num_cols=num_cols, cat_cols=cat_cols)
+
     pipeline = get_pipeline(num_cols, cat_cols)
 
     X_tr = pipeline.fit_transform(X_tr_raw)

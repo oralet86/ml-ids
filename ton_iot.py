@@ -41,16 +41,57 @@ from utils import (
     logger,
 )
 
+# This determines how much of the total data will be used.
+# 0.25 Means %25 of the original data is picked via stratified sampling.
+# This is not in params.py since the value will be different for each dataset.
+DATA_PCT = 0.5
 
-def get_toniot() -> pd.DataFrame:
-    """Load the TON_IoT dataset from a CSV file into a DataFrame."""
+
+def get_toniot(pct: float = DATA_PCT) -> pd.DataFrame:
+    """
+    Load the TON_IoT dataset from a CSV file into a DataFrame.
+
+    If pct < 1.0, returns a stratified sample on 'label' to preserve class ratios.
+    """
     file = next(TON_IOT_PATH.rglob("train_test_network.csv"))
     if not file:
         raise FileNotFoundError("train_test_network.csv not found.")
+
     logger.info(f"Found dataset in {file}")
     start = time.time()
     df = pd.read_csv(file, engine="pyarrow", dtype_backend="pyarrow")
-    df.columns = df.columns.str.strip()
+    df.columns = df.columns.astype(str).str.strip()
+
+    if pct < 1.0:
+        if "label" not in df.columns:
+            raise ValueError(
+                "Stratified sampling requires 'label' column, but it was not found."
+            )
+
+        total_len = len(df)
+        target_n = max(1, int(round(total_len * pct)))
+
+        df = (
+            df.groupby("label", group_keys=False)
+            .apply(
+                lambda g: g.sample(
+                    n=max(1, int(round(len(g) * pct))),
+                    replace=False,
+                    random_state=RANDOM_STATE,
+                )
+            )
+            .reset_index(drop=True)
+        )
+
+        # Correct any rounding drift
+        if len(df) > target_n:
+            df = df.sample(n=target_n, random_state=RANDOM_STATE).reset_index(drop=True)
+
+        logger.info(
+            f"Returning stratified sample on 'label': "
+            f"{len(df)}/{total_len} rows (pct={pct})"
+        )
+
     end = time.time()
     logger.info(f"Loaded dataset in {end - start:.2f} seconds")
     return df

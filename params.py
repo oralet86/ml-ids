@@ -1,5 +1,5 @@
 # Search Parameters
-N_TRIALS = 1
+N_TRIALS = 50
 
 # K-fold Splits
 N_SPLITS = 5
