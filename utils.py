@@ -5,18 +5,21 @@ import sys
 from artifical_neural_network import ArtificialNeuralNetwork
 from lstm_model import LSTMModel
 from lstm_cnn_model import CNNLSTMModel
+from transformer import TransformerModel
+from transformer_158bit import Transformer158Model
 import traditional_models as tm
 
 # Helper list to run evals in a loop
 MODEL_LIST = [
+    Transformer158Model,
     tm.RandomForestModel,
     tm.XGBoostModel,
     tm.LightGBMModel,
     tm.CatBoostModel,
-    tm.SVCModel,
     ArtificialNeuralNetwork,
     LSTMModel,
     CNNLSTMModel,
+    TransformerModel,
 ]
 
 # PATHS
