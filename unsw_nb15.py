@@ -76,23 +76,20 @@ def get_unsw_nb15(pct: float = DATA_PCT) -> pd.DataFrame:
 
     df = pd.concat([df_train, df_test], ignore_index=True)
 
-    if pct < 1.0:
-        if "label" not in df.columns:
-            raise ValueError(
-                "Stratified sampling requires 'label' column, but it was not found."
-            )
+    if "label" not in df.columns:
+        raise ValueError("Expected 'label' column was not found in UNSW-NB15 data.")
+    df["label"] = df["label"].astype("object")
 
+    if pct < 1.0:
         total_len = len(df)
         target_n = max(1, int(round(total_len * pct)))
 
         df = (
             df.groupby("label", group_keys=False)
-            .apply(
-                lambda g: g.sample(
-                    n=max(1, int(round(len(g) * pct))),
-                    replace=False,
-                    random_state=RANDOM_STATE,
-                )
+            .sample(
+                frac=pct,
+                replace=False,
+                random_state=RANDOM_STATE,
             )
             .reset_index(drop=True)
         )

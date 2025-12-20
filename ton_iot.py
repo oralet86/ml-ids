@@ -62,23 +62,20 @@ def get_toniot(pct: float = DATA_PCT) -> pd.DataFrame:
     df = pd.read_csv(file, engine="pyarrow", dtype_backend="pyarrow")
     df.columns = df.columns.astype(str).str.strip()
 
-    if pct < 1.0:
-        if "label" not in df.columns:
-            raise ValueError(
-                "Stratified sampling requires 'label' column, but it was not found."
-            )
+    if "label" not in df.columns:
+        raise ValueError("Expected 'label' column was not found in TON_IoT data.")
+    df["label"] = df["label"].astype("object")
 
+    if pct < 1.0:
         total_len = len(df)
         target_n = max(1, int(round(total_len * pct)))
 
         df = (
             df.groupby("label", group_keys=False)
-            .apply(
-                lambda g: g.sample(
-                    n=max(1, int(round(len(g) * pct))),
-                    replace=False,
-                    random_state=RANDOM_STATE,
-                )
+            .sample(
+                frac=pct,
+                replace=False,
+                random_state=RANDOM_STATE,
             )
             .reset_index(drop=True)
         )
@@ -268,7 +265,7 @@ def tune_ton_iot_dl(
 
     target_col = "label"
     X = df.drop(columns=[target_col])
-    y = df[target_col].values
+    y = pd.Categorical(df[target_col].astype(str)).codes
 
     cat_cols = X.select_dtypes(
         include=["object", "string", "category"]
@@ -377,7 +374,7 @@ def tune_ton_iot_ml(
 
     target_col = "label"
     X = df.drop(columns=[target_col])
-    y = df[target_col].values
+    y = pd.Categorical(df[target_col].astype(str)).codes
 
     cat_cols = X.select_dtypes(
         include=["object", "string", "category"]

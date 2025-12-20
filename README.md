@@ -135,6 +135,5 @@ The project implements and benchmarks the following AI models:
 
 * **Random Forest:** Robust baseline for classification.
 * **XGBoost / LGBM / CatBoost:** Gradient boosting machines for high performance on tabular data.
-* **SVC:** C-Support Vector Classification model for margin-based classification.
 * **MLP (Multi-Layer Perceptron):** Standard dense neural networks.
 * **CNN-LSTM:** A hybrid model using Convolutional layers for feature extraction and LSTM for temporal/sequence dependency analysis.

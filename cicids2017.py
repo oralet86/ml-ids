@@ -50,7 +50,7 @@ def get_cicids2017(pct: float = DATA_PCT) -> pd.DataFrame:
     """
     Load the CICIDS2017 dataset from CSV files into a single DataFrame.
 
-    If pct < 1.0, returns a stratified sample on 'label' to preserve class ratios.
+    If pct < 1.0, returns a stratified sample on 'Label' to preserve class ratios.
     """
     data_path = str(CICIDS2017_PATH / "*.csv")
     logger.info(f"Loading CICIDS2017 dataset from {data_path}")
@@ -62,6 +62,7 @@ def get_cicids2017(pct: float = DATA_PCT) -> pd.DataFrame:
 
     df_list: List[pd.DataFrame] = []
     start = time.time()
+
     for file in all_files:
         df = pd.read_csv(file, engine="pyarrow", dtype_backend="pyarrow")
         df.columns = df.columns.astype(str).str.strip()
@@ -69,23 +70,21 @@ def get_cicids2017(pct: float = DATA_PCT) -> pd.DataFrame:
 
     combined_df = pd.concat(df_list, ignore_index=True)
 
-    if pct < 1.0:
-        if "Label" not in combined_df.columns:
-            raise ValueError(
-                "Stratified sampling requires 'Label' column, but it was not found."
-            )
+    if "Label" not in combined_df.columns:
+        raise ValueError("Expected 'Label' column was not found in CICIDS2017 data.")
 
+    combined_df["Label"] = combined_df["Label"].astype("object")
+
+    if pct < 1.0:
         total_len = len(combined_df)
         target_n = max(1, int(round(total_len * pct)))
 
         combined_df = (
             combined_df.groupby("Label", group_keys=False)
-            .apply(
-                lambda g: g.sample(
-                    n=max(1, int(round(len(g) * pct))),
-                    replace=False,
-                    random_state=RANDOM_STATE,
-                )
+            .sample(
+                frac=pct,
+                replace=False,
+                random_state=RANDOM_STATE,
             )
             .reset_index(drop=True)
         )
@@ -450,7 +449,6 @@ def tune_cicids2017_dl(
             objective, n_trials=n_trials, callbacks=[lambda s, t: pbar.update(1)]
         )
 
-    # n_splits is now "1 holdout", but keep arg for log format compatibility
     return save_results(
         study, model_name, n_trials, n_splits=1, total_time=time.time() - start_time
     )

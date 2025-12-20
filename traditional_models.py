@@ -8,7 +8,6 @@ from base_models_abc import BaseMLModel, ArrayLike
 from xgboost import XGBClassifier
 from catboost import CatBoostClassifier
 from lightgbm import LGBMClassifier
-from sklearn.svm import SVC
 from params import RANDOM_STATE
 
 
@@ -192,53 +191,6 @@ class CatBoostModel(BaseMLModel):
         y_val: ArrayLike,
     ) -> Dict[str, float]:
         self.model.fit(X_train, y_train, eval_set=(X_val, y_val), verbose=False)
-        y_pred = self.model.predict(X_val)
-
-        return {
-            "f1": float(f1_score(y_val, y_pred, average="binary", zero_division=0)),
-            "accuracy": float(accuracy_score(y_val, y_pred)),
-            "precision": float(
-                precision_score(y_val, y_pred, average="binary", zero_division=0)
-            ),
-            "recall": float(
-                recall_score(y_val, y_pred, average="binary", zero_division=0)
-            ),
-        }
-
-
-class SVCModel(BaseMLModel):
-    """
-    Wrapper for Scikit-Learn's C-Support Vector Classification (SVC).
-    """
-
-    def __init__(self, **kwargs):
-        self.model = SVC(**kwargs)
-
-    @classmethod
-    def sample_hyperparameters(cls, trial: optuna.Trial) -> Dict[str, Any]:
-        kernel = trial.suggest_categorical("kernel", ["rbf", "linear"])
-
-        params = {
-            "C": trial.suggest_float("C", 1e-3, 100, log=True),
-            "kernel": kernel,
-            "random_state": RANDOM_STATE,
-            "max_iter": 2000,
-            "cache_size": 1000,
-        }
-
-        if kernel == "rbf":
-            params["gamma"] = trial.suggest_categorical("gamma", ["scale", "auto"])
-
-        return params
-
-    def train_model(
-        self,
-        X_train: ArrayLike,
-        y_train: ArrayLike,
-        X_val: ArrayLike,
-        y_val: ArrayLike,
-    ) -> Dict[str, float]:
-        self.model.fit(X_train, y_train)
         y_pred = self.model.predict(X_val)
 
         return {
