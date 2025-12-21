@@ -1,547 +1,373 @@
+# CICIDS2017.py
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 import time
 from datetime import datetime
 from glob import glob
-from typing import Any, Dict, List, Tuple, Type
+from typing import Any, Dict, List, Tuple
 import numpy as np
-import optuna
 import pandas as pd
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from imblearn.over_sampling import SMOTE
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import MinMaxScaler
-from torch.utils.data import DataLoader, TensorDataset
-from tqdm import tqdm
-from base_models_abc import ArrayLike, BaseDLModel, BaseMLModel
-from params import (
-    N_TRIALS,
-    RANDOM_STATE,
-    TEST_SIZE,
-    VAL_IN_TRAIN,
-    BATCH_SIZE,
-    MOMENTUM,
-    EPOCHS,
-    PATIENCE,
-    GINI_N_ESTIMATORS,
-    TOP_K_FEATURES,
-    SMOTE_K_NEIGHBORS,
-)
-from utils import (
-    CICIDS2017_PATH,
-    HYPERPARAMS_DIR,
-    MODEL_LIST,
-    RESULTS_DIR,
-    logger,
-)
-
-# This determines how much of the total data will be used.
-# 0.25 Means %25 of the original data is picked via stratified sampling.
-# This is not in params.py since the value will be different for each dataset.
-DATA_PCT = 0.05
 
 
-def get_cicids2017(pct: float = DATA_PCT) -> pd.DataFrame:
+@dataclass(frozen=True)
+class SplitSpec:
+    """Day-based split specification used for CICIDS2017 CSVs named by weekday."""
+
+    train_days: Tuple[str, ...]
+    val_days: Tuple[str, ...]
+    test_days: Tuple[str, ...]
+
+
+def day_from_filename(path: str) -> str:
     """
-    Load the CICIDS2017 dataset from CSV files into a single DataFrame.
-
-    If pct < 1.0, returns a stratified sample on 'Label' to preserve class ratios.
+    Infer day-of-week from CICIDS2017 filename prefix.
+    Expected: monday/tuesday/wednesday/thursday/friday*.csv (case-insensitive).
     """
-    data_path = str(CICIDS2017_PATH / "*.csv")
-    logger.info(f"Loading CICIDS2017 dataset from {data_path}")
-
-    all_files = glob(data_path)
-    logger.info(f"Found {len(all_files)} files in {CICIDS2017_PATH}")
-    if not all_files:
-        raise FileNotFoundError(f"No CSV files found under: {data_path}")
-
-    df_list: List[pd.DataFrame] = []
-    start = time.time()
-
-    for file in all_files:
-        df = pd.read_csv(file, engine="pyarrow", dtype_backend="pyarrow")
-        df.columns = df.columns.astype(str).str.strip()
-        df_list.append(df)
-
-    combined_df = pd.concat(df_list, ignore_index=True)
-
-    if "Label" not in combined_df.columns:
-        raise ValueError("Expected 'Label' column was not found in CICIDS2017 data.")
-
-    combined_df["Label"] = combined_df["Label"].astype("object")
-
-    if pct < 1.0:
-        total_len = len(combined_df)
-        target_n = max(1, int(round(total_len * pct)))
-
-        combined_df = (
-            combined_df.groupby("Label", group_keys=False)
-            .sample(
-                frac=pct,
-                replace=False,
-                random_state=RANDOM_STATE,
-            )
-            .reset_index(drop=True)
-        )
-
-        # Correct any rounding drift
-        if len(combined_df) > target_n:
-            combined_df = combined_df.sample(
-                n=target_n, random_state=RANDOM_STATE
-            ).reset_index(drop=True)
-
-        logger.info(
-            f"Returning stratified sample on 'Label': "
-            f"{len(combined_df)}/{total_len} rows (pct={pct})"
-        )
-
-    end = time.time()
-    logger.info(f"Loaded {len(all_files)} files in {end - start:.2f} seconds")
-    return combined_df
+    base = os.path.basename(path).strip().lower()
+    for d in ("monday", "tuesday", "wednesday", "thursday", "friday"):
+        if base.startswith(d):
+            return d
+    raise ValueError(f"Could not infer day-of-week from filename: {path}")
 
 
-def _resolve_label_column(df: pd.DataFrame, label_hint: str = "Label") -> str:
+def stratified_sample_per_file(
+    df: pd.DataFrame, *, label_col: str, pct: float, random_state: int
+) -> pd.DataFrame:
     """
-    Resolve the label column using case/whitespace-insensitive match.
+    Stratified sampling within a single CICIDS file by label_col.
+    Matches your prior behavior: groupby(label).sample(frac=pct), then hard-cap to target_n.
     """
-    cols = list(df.columns)
-    if label_hint in cols:
-        return label_hint
-
-    normalized = [c.strip().lower() for c in cols]
-    target_norm = label_hint.strip().lower()
-    try:
-        return cols[normalized.index(target_norm)]
-    except ValueError as e:
+    if pct >= 1.0:
+        return df
+    if label_col not in df.columns:
         raise ValueError(
-            f"Label column not found: {label_hint}. Available columns: {cols[:50]}..."
-        ) from e
-
-
-def preprocess_cicids2017(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Preprocess CICIDS2017:
-    - strip column names
-    - drop duplicated columns
-    - replace inf/-inf with NaN and drop NaNs
-    - drop duplicate rows
-    """
-    logger.info("Starting preprocessing of CICIDS2017 dataset...")
-    start = time.time()
-
+            f"Expected '{label_col}' column was not found in CICIDS2017 data."
+        )
     df = df.copy()
-    df.columns = df.columns.str.strip()
+    df[label_col] = df[label_col].astype("object")
 
-    if df.columns.duplicated().any():
-        dup_cols = df.columns[df.columns.duplicated()].tolist()
-        logger.info(f"Dropping duplicated CICIDS2017 columns: {dup_cols}")
-        df = df.loc[:, ~df.columns.duplicated()]
+    total_len = len(df)
+    target_n = max(1, int(round(total_len * pct)))
 
-    before_len = len(df)
-    df = df.replace([np.inf, -np.inf], np.nan).dropna()
-    logger.info(
-        f"Removed {before_len - len(df)} rows due to NaN/Inf; remaining: {len(df)}"
+    out = (
+        df.groupby(label_col, group_keys=False)
+        .sample(frac=pct, replace=False, random_state=random_state)
+        .reset_index(drop=True)
     )
+    if len(out) > target_n:
+        out = out.sample(n=target_n, random_state=random_state).reset_index(drop=True)
+    return out
 
-    before_dups = len(df)
+
+def load_cicids2017(
+    *,
+    cicids_dir: os.PathLike | str,
+    label_col: str = "Label",
+    pct: float = 1.0,
+    random_state: int = 0,
+    logger: Any,
+) -> pd.DataFrame:
+    """
+    Load all CICIDS2017 CSVs under cicids_dir, add '__day' column inferred from filenames.
+    Sampling is applied *per file* (stratified by label_col) when pct < 1.0.
+    """
+    files = sorted(glob(str(os.path.join(str(cicids_dir), "*.csv"))))
+    logger.info(f"Found {len(files)} files in {cicids_dir}")
+    if not files:
+        raise FileNotFoundError(f"No CSV files found under: {cicids_dir}")
+
+    dfs: List[pd.DataFrame] = []
+    t0 = time.time()
+
+    for f in files:
+        day = day_from_filename(f)
+        df = pd.read_csv(f, engine="pyarrow", dtype_backend="pyarrow")
+        df.columns = df.columns.astype(str).str.strip()
+
+        if label_col not in df.columns:
+            raise ValueError(f"Expected '{label_col}' column not found in file: {f}")
+
+        if pct < 1.0:
+            n0 = len(df)
+            df = stratified_sample_per_file(
+                df, label_col=label_col, pct=pct, random_state=random_state
+            )
+            logger.info(f"Sampled {day}: {len(df)}/{n0} (pct={pct})")
+
+        df["__day"] = day
+        dfs.append(df)
+
+    out = pd.concat(dfs, ignore_index=True)
+    logger.info(f"Loaded {len(dfs)} files in {time.time() - t0:.2f}s")
+    return out
+
+
+def preprocess_cicids2017(df: pd.DataFrame, *, logger: Any) -> pd.DataFrame:
+    """
+    EXACT same preprocessing as before:
+      - strip column names
+      - drop duplicated columns
+      - replace +/-inf -> NaN, dropna
+      - drop duplicate rows
+    """
+    t0 = time.time()
+    df = df.copy()
+    df.columns = df.columns.astype(str).str.strip()
+    if df.columns.duplicated().any():
+        df = df.loc[:, ~df.columns.duplicated()]
+    n0 = len(df)
+    df = df.replace([np.inf, -np.inf], np.nan).dropna()
+    n1 = len(df)
     df = df.drop_duplicates()
-    logger.info(f"Removed {before_dups - len(df)} duplicate rows")
-
-    end = time.time()
-    logger.info(f"Completed preprocessing in {end - start:.2f} seconds")
+    n2 = len(df)
+    logger.info(
+        f"Preprocess: -NaN/Inf {n0 - n1}, -dups {n1 - n2}, final {n2} in {time.time() - t0:.2f}s"
+    )
     return df
 
 
-def _top_k_by_gini(
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    feature_names: List[str],
-    top_k: int,
-    random_state: int,
-) -> List[str]:
+def split_by_day(
+    df: pd.DataFrame,
+    *,
+    label_col: str,
+    split: SplitSpec,
+    logger: Any,
+) -> Tuple[
+    pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray
+]:
     """
-    Compute top-K features using RandomForest Gini importance.
+    Day-based split using df['__day'] produced by load_cicids2017().
+    Produces binary y: (label != 'BENIGN').
     """
-    rf = RandomForestClassifier(
-        n_estimators=GINI_N_ESTIMATORS,
-        n_jobs=-1,
-        random_state=random_state,
-        class_weight="balanced",
-        oob_score=False,
-        bootstrap=True,
+    if "__day" not in df.columns:
+        raise ValueError(
+            "Expected '__day' column not found. load_cicids2017() must add '__day'."
+        )
+
+    day = df["__day"].astype("string").str.strip().str.lower()
+    train_df = df.loc[day.isin(split.train_days)].copy()
+    val_df = df.loc[day.isin(split.val_days)].copy()
+    test_df = df.loc[day.isin(split.test_days)].copy()
+
+    if train_df.empty:
+        raise ValueError(f"Train split is empty. Expected days: {split.train_days}.")
+    if val_df.empty:
+        raise ValueError(f"Val split is empty. Expected days: {split.val_days}.")
+    if test_df.empty:
+        raise ValueError(f"Test split is empty. Expected days: {split.test_days}.")
+
+    def to_binary_y(frame: pd.DataFrame) -> np.ndarray:
+        return (
+            (frame[label_col].astype("string").str.strip() != "BENIGN")
+            .astype(np.int64)
+            .to_numpy()
+        )
+
+    y_train = to_binary_y(train_df)
+    y_val = to_binary_y(val_df)
+    y_test = to_binary_y(test_df)
+
+    X_train = train_df.drop(columns=[label_col, "__day"])
+    X_val = val_df.drop(columns=[label_col, "__day"])
+    X_test = test_df.drop(columns=[label_col, "__day"])
+
+    logger.info(
+        f"Day split: train={len(train_df)} val={len(val_df)} test={len(test_df)} | "
+        f"train_pos={float(y_train.mean()):.4f} val_pos={float(y_val.mean()):.4f} test_pos={float(y_test.mean()):.4f}"
     )
-    rf.fit(X_train, y_train)
 
-    importances = rf.feature_importances_
-    order = np.argsort(importances)[::-1]
-    k = min(top_k, len(feature_names))
-    top_idx = order[:k]
-    return [feature_names[i] for i in top_idx]
+    return X_train, y_train, X_val, y_val, X_test, y_test
 
 
-def _chronological_split(
-    X: pd.DataFrame, y: np.ndarray, test_size: float
-) -> Tuple[pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray]:
+def numeric_preprocess_fit_transform(
+    X_train_raw: pd.DataFrame, X_test_raw: pd.DataFrame
+) -> Tuple[np.ndarray, np.ndarray, List[str], SimpleImputer, MinMaxScaler]:
     """
-    Chronological split (no shuffle): first (1-test_size) for train, last test_size for test.
+    Shared numeric pipeline (EXACT same behavior):
+      - numeric-only
+      - drop constant columns based on train
+      - align test to train's remaining columns
+      - median impute (fit on train)
+      - MinMax scale (fit on train)
     """
-    if not (0.0 < test_size < 1.0):
-        raise ValueError(f"test_size must be in (0,1). Got {test_size}.")
+    X_tr = X_train_raw.select_dtypes(include=[np.number]).copy()
+    X_te = X_test_raw.select_dtypes(include=[np.number]).copy()
 
-    split_idx = int(len(X) * (1.0 - test_size))
-    if split_idx <= 0 or split_idx >= len(X):
-        raise ValueError(
-            f"Bad split index {split_idx} for dataset length {len(X)} with test_size={test_size}."
-        )
-
-    X_train = X.iloc[:split_idx]
-    y_train = y[:split_idx]
-    X_test = X.iloc[split_idx:]
-    y_test = y[split_idx:]
-    return X_train, y_train, X_test, y_test
-
-
-def _train_val_split_from_train(
-    X_train: pd.DataFrame, y_train: np.ndarray, val_fraction: float
-) -> Tuple[pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray]:
-    """
-    From an already-chronological train set, take the last `val_fraction` as validation.
-    """
-    if not (0.0 < val_fraction < 1.0):
-        raise ValueError(f"val_fraction must be in (0,1). Got {val_fraction}.")
-
-    split_idx = int(len(X_train) * (1.0 - val_fraction))
-    if split_idx <= 0 or split_idx >= len(X_train):
-        raise ValueError(
-            f"Bad split index {split_idx} for train length {len(X_train)} with val_fraction={val_fraction}."
-        )
-
-    X_tr = X_train.iloc[:split_idx]
-    y_tr = y_train[:split_idx]
-    X_val = X_train.iloc[split_idx:]
-    y_val = y_train[split_idx:]
-    return X_tr, y_tr, X_val, y_val
-
-
-def process_holdout_data(
-    X_tr_raw: pd.DataFrame,
-    y_tr: ArrayLike,
-    X_val_raw: pd.DataFrame,
-    y_val: ArrayLike,
-    random_state: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Holdout preprocessing (train-only fit, then transform val):
-    - numeric-only
-    - drop constant columns (based on train)
-    - impute median (fit train only)
-    - MinMaxScaler (fit train only)
-    - SMOTE on scaled train only
-    - RF Gini top-K on balanced train
-    - apply same selected features to validation (no SMOTE on val)
-    """
-    X_tr_num = X_tr_raw.select_dtypes(include=[np.number]).copy()
-    X_val_num = X_val_raw.select_dtypes(include=[np.number]).copy()
-
-    if X_tr_num.empty:
+    if X_tr.shape[1] == 0:
         raise ValueError("No numeric features found in training split.")
-    if X_val_num.empty:
-        raise ValueError("No numeric features found in validation split.")
+    if X_te.shape[1] == 0:
+        raise ValueError("No numeric features found in test split.")
 
-    nunique = X_tr_num.nunique(dropna=False)
-    constant_cols = nunique[nunique <= 1].index.tolist()
-    if constant_cols:
-        X_tr_num = X_tr_num.drop(columns=constant_cols)
-        X_val_num = X_val_num.drop(columns=constant_cols, errors="ignore")
+    nunique = X_tr.nunique(dropna=False)
+    const_cols = nunique[nunique <= 1].index
+    if len(const_cols) > 0:
+        X_tr = X_tr.drop(columns=const_cols)
+        X_te = X_te.drop(columns=const_cols, errors="ignore")
 
-    if X_tr_num.shape[1] == 0:
-        raise ValueError("No non-constant numeric features remain after filtering.")
+    names = X_tr.columns.tolist()
+    X_te = X_te.reindex(columns=names)
 
-    imputer = SimpleImputer(strategy="median")
-    X_tr_imp = imputer.fit_transform(X_tr_num)
-    X_val_imp = imputer.transform(X_val_num)
+    imp = SimpleImputer(strategy="median")
+    X_tr_np = imp.fit_transform(X_tr)
+    X_te_np = imp.transform(X_te)
 
-    scaler = MinMaxScaler()
-    X_tr_scaled = scaler.fit_transform(X_tr_imp)
-    X_val_scaled = scaler.transform(X_val_imp)
+    sc = MinMaxScaler()
+    X_tr_np = sc.fit_transform(X_tr_np)
+    X_te_np = sc.transform(X_te_np)
 
-    if len(np.unique(y_tr)) > 1:
-        smote = SMOTE(random_state=random_state, k_neighbors=SMOTE_K_NEIGHBORS)
-        X_tr_bal, y_tr_bal = smote.fit_resample(X_tr_scaled, y_tr)
-    else:
-        X_tr_bal, y_tr_bal = X_tr_scaled, y_tr
+    return (
+        X_tr_np.astype(np.float32, copy=False),
+        X_te_np.astype(np.float32, copy=False),
+        names,
+        imp,
+        sc,
+    )
 
-    feature_names = X_tr_num.columns.tolist()
 
-    if len(np.unique(y_tr_bal)) > 1 and X_tr_bal.shape[1] > 1:
-        top_features = _top_k_by_gini(
-            X_train=X_tr_bal,
-            y_train=np.asarray(y_tr_bal),
-            feature_names=feature_names,
-            top_k=TOP_K_FEATURES,
-            random_state=random_state,
-        )
-        top_idx = [feature_names.index(f) for f in top_features]
-        X_tr_final = X_tr_bal[:, top_idx]
-        X_val_final = X_val_scaled[:, top_idx]
-    else:
-        X_tr_final = X_tr_bal
-        X_val_final = X_val_scaled
+def numeric_preprocess_transform(
+    X_raw: pd.DataFrame,
+    *,
+    names: List[str],
+    imp: SimpleImputer,
+    sc: MinMaxScaler,
+) -> np.ndarray:
+    """
+    Transform-only path (EXACT same behavior):
+      - numeric-only
+      - reindex to TRAIN names (missing->NaN->imputed)
+      - apply train-fitted imputer+scaler
+    """
+    X_num = X_raw.select_dtypes(include=[np.number]).copy()
+    X_num = X_num.reindex(columns=names)
+    X_np = imp.transform(X_num)
+    X_np = sc.transform(X_np)
+    return X_np.astype(np.float32, copy=False)
 
-    return X_tr_final, y_tr_bal, X_val_final, y_val
+
+def metrics_binary(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    """Shared TP/TN/FP/FN metrics (EXACT same behavior)."""
+    y_true = y_true.astype(np.int64)
+    y_pred = y_pred.astype(np.int64)
+
+    tp = int(((y_true == 1) & (y_pred == 1)).sum())
+    tn = int(((y_true == 0) & (y_pred == 0)).sum())
+    fp = int(((y_true == 0) & (y_pred == 1)).sum())
+    fn = int(((y_true == 1) & (y_pred == 0)).sum())
+
+    acc = (tp + tn) / max(1, tp + tn + fp + fn)
+    prec = tp / max(1, tp + fp)
+    rec = tp / max(1, tp + fn)
+    f1 = (2 * prec * rec) / max(1e-12, prec + rec)
+
+    return {
+        "f1": float(f1),
+        "accuracy": float(acc),
+        "precision": float(prec),
+        "recall": float(rec),
+    }
+
+
+def stratified_holdout(
+    X: pd.DataFrame,
+    y: np.ndarray,
+    *,
+    val_frac: float,
+    random_state: int,
+) -> Tuple[pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray]:
+    """
+    Create a stratified validation holdout from (X, y).
+    Returns: X_train2, y_train2, X_val, y_val
+    """
+    if not (0.0 < float(val_frac) < 1.0):
+        raise ValueError(f"val_frac must be in (0,1). Got {val_frac}")
+
+    y = np.asarray(y, dtype=np.int64)
+    n = len(y)
+    if n < 2:
+        raise ValueError("Not enough samples to create holdout.")
+
+    rng = np.random.default_rng(int(random_state))
+
+    idx_pos = np.flatnonzero(y == 1)
+    idx_neg = np.flatnonzero(y == 0)
+
+    # Ensure at least 1 sample from each class if possible
+    n_pos_val = int(round(len(idx_pos) * val_frac))
+    n_neg_val = int(round(len(idx_neg) * val_frac))
+
+    if len(idx_pos) > 0:
+        n_pos_val = max(1, min(len(idx_pos) - 1 if len(idx_pos) > 1 else 1, n_pos_val))
+    if len(idx_neg) > 0:
+        n_neg_val = max(1, min(len(idx_neg) - 1 if len(idx_neg) > 1 else 1, n_neg_val))
+
+    val_pos = (
+        rng.choice(idx_pos, size=n_pos_val, replace=False)
+        if len(idx_pos)
+        else np.array([], dtype=np.int64)
+    )
+    val_neg = (
+        rng.choice(idx_neg, size=n_neg_val, replace=False)
+        if len(idx_neg)
+        else np.array([], dtype=np.int64)
+    )
+
+    val_idx = np.concatenate([val_pos, val_neg])
+    rng.shuffle(val_idx)
+
+    mask = np.ones(n, dtype=bool)
+    mask[val_idx] = False
+    tr_idx = np.flatnonzero(mask)
+
+    X_tr2 = X.iloc[tr_idx].reset_index(drop=True)
+    y_tr2 = y[tr_idx]
+    X_val = X.iloc[val_idx].reset_index(drop=True)
+    y_val = y[val_idx]
+
+    return X_tr2, y_tr2, X_val, y_val
 
 
 def save_results(
-    study: optuna.Study,
+    *,
     model_name: str,
+    best_value: float,
+    best_metrics: Dict[str, float],
+    best_params: Dict[str, Any],
     n_trials: int,
-    n_splits: int,
     total_time: float,
-) -> dict:
-    """Saves best params to JSON and a readable report to LOG."""
-    avg_trial_time = total_time / n_trials if n_trials > 0 else 0.0
-    best_params = study.best_params
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir: os.PathLike | str,
+    logger: Any,
+) -> Dict[str, Any]:
+    """
+    Shared result writer (EXACT same behavior), but directories are passed in
+    so this module does not “know where it will be used”.
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    json_filename = f"CICIDS2017_{model_name}_BestParams_{timestamp}.json"
-    with open(os.path.join(HYPERPARAMS_DIR, json_filename), "w") as f:
-        json.dump(best_params, f, indent=4)
+    os.makedirs(str(results_dir), exist_ok=True)
 
-    log_filename = f"{model_name}_{timestamp}.log"
-    log_path = os.path.join(RESULTS_DIR, log_filename)
-
-    log_content = [
+    log_path = os.path.join(str(results_dir), f"{model_name}_{ts}.log")
+    lines = [
         f"Model: {model_name}",
         "Dataset: CICIDS2017",
+        "Split: Train=Mon-Tue | Val=Wed | Test=Thu-Fri",
         f"Date: {datetime.now().isoformat()}",
-        f"Trials: {n_trials} | CV Splits: {n_splits}",
+        f"Trials: {n_trials}",
         "-" * 60,
-        f"Total Tuning Time: {total_time:.2f}s",
-        f"Avg Trial Time: {avg_trial_time:.2f}s",
+        f"Total Time: {total_time:.2f}s",
         "-" * 60,
-        f"Best Validation F1: {study.best_value:.6f}",
-        f"Best Val Accuracy:  {study.best_trial.user_attrs.get('avg_accuracy', 0.0):.6f}",
-        f"Best Val Precision: {study.best_trial.user_attrs.get('avg_precision', 0.0):.6f}",
-        f"Best Val Recall:    {study.best_trial.user_attrs.get('avg_recall', 0.0):.6f}",
-        f"Best Hyperparameters:\n{json.dumps(best_params, indent=4)}",
-        "-" * 60,
-        "Trial History:",
+        f"Test F1: {best_value:.6f}",
+        f"Test Accuracy:  {best_metrics.get('accuracy', 0.0):.6f}",
+        f"Test Precision: {best_metrics.get('precision', 0.0):.6f}",
+        f"Test Recall:    {best_metrics.get('recall', 0.0):.6f}",
+        f"Params:\n{json.dumps(best_params, indent=4)}",
     ]
-
-    header = (
-        f"{'Trial':<6} | {'F1':<10} | {'Acc':<10} | {'Prec':<10} | "
-        f"{'Rec':<10} | {'State':<10} | {'Dur(s)':<10}"
-    )
-    log_content.append(header)
-    log_content.append("-" * len(header))
-
-    for t in study.trials:
-        dur = t.duration.total_seconds() if t.duration else 0.0
-        f1 = float(t.value) if t.value is not None else 0.0
-        acc = float(t.user_attrs.get("avg_accuracy", 0.0))
-        prec = float(t.user_attrs.get("avg_precision", 0.0))
-        rec = float(t.user_attrs.get("avg_recall", 0.0))
-        log_content.append(
-            f"{t.number:<6} | {f1:<10.6f} | {acc:<10.6f} | {prec:<10.6f} | "
-            f"{rec:<10.6f} | {t.state.name:<10} | {dur:<10.2f}"
-        )
-
     with open(log_path, "w") as f:
-        f.write("\n".join(log_content))
+        f.write("\n".join(lines))
 
-    logger.info(f"Tuning complete. Log saved to {log_path}")
-    logger.info(f"Total: {total_time:.2f}s | Avg Trial: {avg_trial_time:.2f}s")
+    logger.info(f"Saved log to {log_path}")
     return best_params
-
-
-def tune_cicids2017_dl(
-    model_class: Type[BaseDLModel], n_trials: int, random_state: int
-) -> Dict[str, Any]:
-    """
-    DL tuning with:
-      - chronological 80/20 test split
-      - chronological 90/10 split inside train (for validation)
-    """
-    start_time = time.time()
-
-    df = get_cicids2017()
-    df = preprocess_cicids2017(df)
-
-    label_col = _resolve_label_column(df, "Label")
-    y_all = (df[label_col].astype(str).str.strip() != "BENIGN").astype(int).values
-    X_all = df.drop(columns=[label_col])
-
-    # 80/20 chronological train/test
-    X_train, y_train, _, _ = _chronological_split(X_all, y_all, test_size=TEST_SIZE)
-
-    # 90/10 chronological train/val inside train
-    X_tr_raw, y_tr, X_val_raw, y_val = _train_val_split_from_train(
-        X_train, y_train, val_fraction=VAL_IN_TRAIN
-    )
-
-    model_name = model_class.__name__
-    logger.info(
-        f"Starting DL Tuning for {model_name} (chronological 80/20 test, 90/10 val-in-train)..."
-    )
-
-    def objective(trial: optuna.Trial) -> float:
-        hp = model_class.sample_hyperparameters(trial)
-
-        lr = float(hp.pop("lr", hp.pop("learning_rate", 1e-3)))
-        optimizer_name = str(
-            hp.pop("optimizer_name", hp.pop("optimizer", "adam"))
-        ).lower()
-
-        X_tr, y_tr_bal, X_val, y_val_local = process_holdout_data(
-            X_tr_raw, y_tr, X_val_raw, y_val, random_state=random_state
-        )
-
-        if len(np.unique(y_tr_bal)) < 2:
-            logger.warning(
-                f"Trial {trial.number}: Training set contains only 1 class after preprocessing. Returning 0.0."
-            )
-            return 0.0
-
-        train_loader = DataLoader(
-            TensorDataset(torch.FloatTensor(X_tr), torch.FloatTensor(y_tr_bal)),
-            batch_size=BATCH_SIZE,
-            shuffle=True,
-        )
-        val_loader = DataLoader(
-            TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val_local)),
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-        )
-
-        model = model_class(input_dim=X_tr.shape[1], **hp)
-
-        if optimizer_name == "adam":
-            opt = optim.Adam(model.parameters(), lr=lr)
-        elif optimizer_name == "rmsprop":
-            opt = optim.RMSprop(model.parameters(), lr=lr)
-        else:
-            opt = optim.SGD(model.parameters(), lr=lr, momentum=MOMENTUM)
-
-        m = model.train_model(
-            train_loader,
-            val_loader,
-            opt,
-            nn.BCELoss(),
-            epochs=EPOCHS,
-            patience=PATIENCE,
-        )
-
-        trial.set_user_attr("avg_accuracy", float(m.get("accuracy", 0.0)))
-        trial.set_user_attr("avg_precision", float(m.get("precision", 0.0)))
-        trial.set_user_attr("avg_recall", float(m.get("recall", 0.0)))
-
-        return float(m.get("f1", 0.0))
-
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction="maximize")
-    with tqdm(total=n_trials, desc=f"Optimizing {model_name}", unit="trial") as pbar:
-        study.optimize(
-            objective, n_trials=n_trials, callbacks=[lambda s, t: pbar.update(1)]
-        )
-
-    return save_results(
-        study, model_name, n_trials, n_splits=1, total_time=time.time() - start_time
-    )
-
-
-def tune_cicids2017_ml(
-    model_class: Type[BaseMLModel], n_trials: int, random_state: int
-) -> Dict[str, Any]:
-    """
-    ML tuning with:
-      - chronological 80/20 test split
-      - chronological 90/10 split inside train (for validation)
-    """
-    start_time = time.time()
-
-    df = get_cicids2017()
-    df = preprocess_cicids2017(df)
-
-    label_col = _resolve_label_column(df, "Label")
-    y_all = (df[label_col].astype(str).str.strip() != "BENIGN").astype(int).values
-    X_all = df.drop(columns=[label_col])
-
-    # 80/20 chronological train/test
-    X_train, y_train, _, _ = _chronological_split(X_all, y_all, test_size=TEST_SIZE)
-
-    # 90/10 chronological train/val inside train
-    X_tr_raw, y_tr, X_val_raw, y_val = _train_val_split_from_train(
-        X_train, y_train, val_fraction=VAL_IN_TRAIN
-    )
-
-    model_name = model_class.__name__
-    logger.info(
-        f"Starting ML Tuning for {model_name} (chronological 80/20 test, 90/10 val-in-train)..."
-    )
-
-    def objective(trial: optuna.Trial) -> float:
-        hp = model_class.sample_hyperparameters(trial)
-
-        X_tr, y_tr_bal, X_val, y_val_local = process_holdout_data(
-            X_tr_raw, y_tr, X_val_raw, y_val, random_state=random_state
-        )
-
-        if len(np.unique(y_tr_bal)) < 2:
-            logger.warning(
-                f"Trial {trial.number}: Training set contains only 1 class after preprocessing. Returning 0.0."
-            )
-            return 0.0
-
-        model = model_class(**hp)
-        m = model.train_model(X_tr, y_tr_bal, X_val, y_val_local)
-
-        trial.set_user_attr("avg_accuracy", float(m.get("accuracy", 0.0)))
-        trial.set_user_attr("avg_precision", float(m.get("precision", 0.0)))
-        trial.set_user_attr("avg_recall", float(m.get("recall", 0.0)))
-
-        return float(m.get("f1", 0.0))
-
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction="maximize")
-    with tqdm(total=n_trials, desc=f"Optimizing {model_name}", unit="trial") as pbar:
-        study.optimize(
-            objective, n_trials=n_trials, callbacks=[lambda s, t: pbar.update(1)]
-        )
-
-    return save_results(
-        study, model_name, n_trials, n_splits=1, total_time=time.time() - start_time
-    )
-
-
-def tune_cicids2017(
-    model_class: Type[Any], n_trials: int, random_state: int
-) -> Dict[str, Any]:
-    """
-    Automatically routes the model to the correct tuning function (DL vs ML)
-    based on its base class.
-    """
-    if issubclass(model_class, BaseDLModel):
-        logger.info(f"Detected Deep Learning model: {model_class.__name__}")
-        return tune_cicids2017_dl(model_class, n_trials, random_state)
-
-    if issubclass(model_class, BaseMLModel):
-        logger.info(f"Detected ML model: {model_class.__name__}")
-        return tune_cicids2017_ml(model_class, n_trials, random_state)
-
-    raise ValueError(
-        f"Model class {model_class.__name__} must inherit from BaseDLModel or BaseMLModel."
-    )
-
-
-if __name__ == "__main__":
-    for model in MODEL_LIST:
-        tune_cicids2017(
-            model_class=model,
-            n_trials=N_TRIALS,
-            random_state=RANDOM_STATE,
-        )

@@ -1,205 +1,166 @@
-from typing import Dict, Any
-import warnings
-import optuna
+from __future__ import annotations
+
+from typing import Dict
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
-from base_models_abc import BaseMLModel, ArrayLike
-from xgboost import XGBClassifier
 from catboost import CatBoostClassifier
 from lightgbm import LGBMClassifier
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
 from params import RANDOM_STATE
 
 
-class RandomForestModel(BaseMLModel):
-    """
-    Wrapper for Scikit-Learn RandomForestClassifier.
-    """
+def _spw(y: np.ndarray) -> float:
+    y = np.asarray(y)
+    pos = float((y == 1).sum())
+    neg = float((y == 0).sum())
+    return neg / pos if pos else 1.0
 
-    def __init__(self, **kwargs):
-        self.model = RandomForestClassifier(**kwargs)
 
-    @classmethod
-    def sample_hyperparameters(cls, trial: optuna.Trial) -> Dict[str, Any]:
-        return {
-            "n_estimators": trial.suggest_int("n_estimators", 50, 300, step=50),
-            "max_depth": trial.suggest_int("max_depth", 5, 50),
-            "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
-            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 10),
-            "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2"]),
-            "bootstrap": trial.suggest_categorical("bootstrap", [True, False]),
-            "n_jobs": -1,  # Use all cores
-            "random_state": RANDOM_STATE,
-        }
+def _m(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    y_true = np.asarray(y_true, dtype=np.int64)
+    y_pred = np.asarray(y_pred, dtype=np.int64)
 
-    def train_model(
-        self,
-        X_train: ArrayLike,
-        y_train: ArrayLike,
-        X_val: ArrayLike,
-        y_val: ArrayLike,
-    ) -> Dict[str, float]:
-        # Fit
+    tp = int(((y_true == 1) & (y_pred == 1)).sum())
+    tn = int(((y_true == 0) & (y_pred == 0)).sum())
+    fp = int(((y_true == 0) & (y_pred == 1)).sum())
+    fn = int(((y_true == 1) & (y_pred == 0)).sum())
+
+    acc = (tp + tn) / max(1, tp + tn + fp + fn)
+    prec = tp / max(1, tp + fp)
+    rec = tp / max(1, tp + fn)
+    f1 = (2 * prec * rec) / max(1e-12, prec + rec)
+    return {
+        "f1": float(f1),
+        "accuracy": float(acc),
+        "precision": float(prec),
+        "recall": float(rec),
+    }
+
+
+class RandomForestModel:
+    def __init__(self):
+        self.model = RandomForestClassifier(
+            n_estimators=300,
+            max_features="sqrt",
+            bootstrap=True,
+            class_weight="balanced_subsample",
+            n_jobs=-1,
+            random_state=RANDOM_STATE,
+        )
+
+    def fit(self, X_train, y_train) -> "RandomForestModel":
         self.model.fit(X_train, y_train)
+        return self
 
-        # Predict
-        y_pred = self.model.predict(X_val)
+    def predict(self, X):
+        return self.model.predict(X)
 
-        # Metrics
-        return {
-            "f1": float(f1_score(y_val, y_pred, average="binary", zero_division=0)),
-            "accuracy": float(accuracy_score(y_val, y_pred)),
-            "precision": float(
-                precision_score(y_val, y_pred, average="binary", zero_division=0)
-            ),
-            "recall": float(
-                recall_score(y_val, y_pred, average="binary", zero_division=0)
-            ),
-        }
+    def predict_proba(self, X):
+        return self.model.predict_proba(X)
+
+    def train_model(self, X_train, y_train, X_val, y_val) -> Dict[str, float]:
+        self.fit(X_train, y_train)
+        return _m(y_val, self.predict(X_val))
 
 
-class XGBoostModel(BaseMLModel):
-    """
-    Wrapper for XGBoost Classifier.
-    """
+class XGBoostModel:
+    def __init__(self):
+        self.model = XGBClassifier(
+            n_estimators=500,
+            learning_rate=0.1,
+            max_depth=6,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            gamma=0.0,
+            min_child_weight=1,
+            reg_lambda=1.0,
+            reg_alpha=0.0,
+            n_jobs=-1,
+            random_state=RANDOM_STATE,
+            eval_metric="logloss",
+            tree_method="hist",
+            scale_pos_weight=1.0,
+        )
 
-    def __init__(self, **kwargs):
-        self.model = XGBClassifier(**kwargs)
+    def fit(self, X_train, y_train) -> "XGBoostModel":
+        self.model.set_params(scale_pos_weight=_spw(y_train))
+        self.model.fit(X_train, y_train, verbose=False)
+        return self
 
-    @classmethod
-    def sample_hyperparameters(cls, trial: optuna.Trial) -> Dict[str, Any]:
-        return {
-            "n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            "max_depth": trial.suggest_int("max_depth", 3, 12),
-            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "gamma": trial.suggest_float("gamma", 0, 5),
-            "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
-            "n_jobs": -1,
-            "random_state": RANDOM_STATE,
-            "eval_metric": "logloss",
-        }
+    def predict(self, X):
+        return self.model.predict(X)
 
-    def train_model(
-        self,
-        X_train: ArrayLike,
-        y_train: ArrayLike,
-        X_val: ArrayLike,
-        y_val: ArrayLike,
-    ) -> Dict[str, float]:
+    def predict_proba(self, X):
+        return self.model.predict_proba(X)
+
+    def train_model(self, X_train, y_train, X_val, y_val) -> Dict[str, float]:
+        # Keep eval_set behavior for callers that still use train_model()
+        self.model.set_params(scale_pos_weight=_spw(y_train))
         self.model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-        y_pred = self.model.predict(X_val)
-
-        return {
-            "f1": float(f1_score(y_val, y_pred, average="binary", zero_division=0)),
-            "accuracy": float(accuracy_score(y_val, y_pred)),
-            "precision": float(
-                precision_score(y_val, y_pred, average="binary", zero_division=0)
-            ),
-            "recall": float(
-                recall_score(y_val, y_pred, average="binary", zero_division=0)
-            ),
-        }
+        return _m(y_val, self.predict(X_val))
 
 
-class LightGBMModel(BaseMLModel):
-    """
-    Wrapper for Microsoft's LightGBM.
-    """
+class LightGBMModel:
+    def __init__(self):
+        self.model = LGBMClassifier(
+            n_estimators=500,
+            learning_rate=0.1,
+            num_leaves=31,
+            max_depth=8,
+            min_child_samples=20,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            reg_alpha=0.0,
+            reg_lambda=0.0,
+            n_jobs=-1,
+            random_state=RANDOM_STATE,
+            verbosity=-1,
+            scale_pos_weight=1.0,
+        )
 
-    def __init__(self, **kwargs):
-        self.model = LGBMClassifier(**kwargs)
+    def fit(self, X_train, y_train) -> "LightGBMModel":
+        self.model.set_params(scale_pos_weight=_spw(y_train))
+        self.model.fit(np.ascontiguousarray(X_train), y_train)
+        return self
 
-    @classmethod
-    def sample_hyperparameters(cls, trial: optuna.Trial) -> Dict[str, Any]:
-        return {
-            "n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=100),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            "num_leaves": trial.suggest_int("num_leaves", 20, 150),
-            "max_depth": trial.suggest_int("max_depth", -1, 15),  # -1 is no limit
-            "min_child_samples": trial.suggest_int("min_child_samples", 5, 50),
-            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "reg_alpha": trial.suggest_float("reg_alpha", 0, 1.0),
-            "reg_lambda": trial.suggest_float("reg_lambda", 0, 1.0),
-            "n_jobs": -1,
-            "random_state": RANDOM_STATE,
-            "verbosity": -1,
-        }
+    def predict(self, X):
+        return self.model.predict(np.ascontiguousarray(X))
 
-    def train_model(
-        self,
-        X_train: ArrayLike,
-        y_train: ArrayLike,
-        X_val: ArrayLike,
-        y_val: ArrayLike,
-    ) -> Dict[str, float]:
-        X_train = np.ascontiguousarray(X_train)
-        X_val = np.ascontiguousarray(X_val)
+    def predict_proba(self, X):
+        return self.model.predict_proba(np.ascontiguousarray(X))
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                category=UserWarning,
-                message=".*X does not have valid feature names.*",
-            )
-
-            self.model.fit(X_train, y_train)
-            y_pred = self.model.predict(X_val)
-
-        return {
-            "f1": float(f1_score(y_val, y_pred, average="binary", zero_division=0)),
-            "accuracy": float(accuracy_score(y_val, y_pred)),
-            "precision": float(
-                precision_score(y_val, y_pred, average="binary", zero_division=0)
-            ),
-            "recall": float(
-                recall_score(y_val, y_pred, average="binary", zero_division=0)
-            ),
-        }
+    def train_model(self, X_train, y_train, X_val, y_val) -> Dict[str, float]:
+        self.fit(X_train, y_train)
+        return _m(y_val, self.predict(X_val))
 
 
-class CatBoostModel(BaseMLModel):
-    """
-    Wrapper for Yandex's CatBoost.
-    """
+class CatBoostModel:
+    def __init__(self):
+        self.model = CatBoostClassifier(
+            iterations=1000,
+            learning_rate=0.1,
+            depth=8,
+            l2_leaf_reg=3.0,
+            loss_function="Logloss",
+            auto_class_weights="Balanced",
+            thread_count=-1,
+            random_seed=RANDOM_STATE,
+            verbose=0,
+            allow_writing_files=False,
+        )
 
-    def __init__(self, **kwargs):
-        self.model = CatBoostClassifier(**kwargs)
+    def fit(self, X_train, y_train) -> "CatBoostModel":
+        self.model.fit(X_train, y_train, verbose=False)
+        return self
 
-    @classmethod
-    def sample_hyperparameters(cls, trial: optuna.Trial) -> Dict[str, Any]:
-        return {
-            "iterations": trial.suggest_int("iterations", 100, 1000, step=100),
-            "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.3, log=True),
-            "depth": trial.suggest_int("depth", 4, 10),
-            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-2, 10, log=True),
-            "border_count": trial.suggest_int("border_count", 32, 255),
-            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "thread_count": -1,
-            "random_seed": RANDOM_STATE,
-            "verbose": 0,
-            "allow_writing_files": False,
-        }
+    def predict(self, X):
+        p = self.model.predict(X)
+        return np.asarray(p).reshape(-1).astype(np.int64)
 
-    def train_model(
-        self,
-        X_train: ArrayLike,
-        y_train: ArrayLike,
-        X_val: ArrayLike,
-        y_val: ArrayLike,
-    ) -> Dict[str, float]:
+    def predict_proba(self, X):
+        return self.model.predict_proba(X)
+
+    def train_model(self, X_train, y_train, X_val, y_val) -> Dict[str, float]:
+        # Keep eval_set behavior for callers that still use train_model()
         self.model.fit(X_train, y_train, eval_set=(X_val, y_val), verbose=False)
-        y_pred = self.model.predict(X_val)
-
-        return {
-            "f1": float(f1_score(y_val, y_pred, average="binary", zero_division=0)),
-            "accuracy": float(accuracy_score(y_val, y_pred)),
-            "precision": float(
-                precision_score(y_val, y_pred, average="binary", zero_division=0)
-            ),
-            "recall": float(
-                recall_score(y_val, y_pred, average="binary", zero_division=0)
-            ),
-        }
+        return _m(y_val, self.predict(X_val))

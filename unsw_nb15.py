@@ -1,126 +1,123 @@
+# unsw_nb15.py
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Tuple, Type
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
 import numpy as np
-import optuna
 import pandas as pd
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from imblearn.over_sampling import SMOTE
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.feature_selection import SelectFromModel, VarianceThreshold
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from torch.utils.data import DataLoader, TensorDataset
-from tqdm import tqdm
-from base_models_abc import ArrayLike, BaseDLModel, BaseMLModel
-from params import (
-    N_TRIALS,
-    RANDOM_STATE,
-    TEST_SIZE,
-    VAL_IN_TRAIN,
-    BATCH_SIZE,
-    MOMENTUM,
-    EPOCHS,
-    PATIENCE,
-    VAR_THRESHOLD,
-    GINI_N_ESTIMATORS,
-    TOP_K_FEATURES,
-    SMOTE_K_NEIGHBORS,
-)
-from utils import HYPERPARAMS_DIR, MODEL_LIST, RESULTS_DIR, UNSW_NB15_PATH, logger
-
-# This determines how much of the total data will be used.
-# 0.25 Means %25 of the original data is picked via stratified sampling.
-# This is not in params.py since the value will be different for each dataset.
-DATA_PCT = 0.5
 
 
-def _find_first_csv(pattern: str) -> os.PathLike:
-    """Return first match under UNSW_NB15_PATH; raise FileNotFoundError if none."""
-    matches = list(UNSW_NB15_PATH.rglob(pattern))
+def _find_first_csv(root: Path, pattern: str) -> Path:
+    """Return first match under root; raise FileNotFoundError if none."""
+    matches = list(root.rglob(pattern))
     if not matches:
         raise FileNotFoundError(
-            f"Could not find '{pattern}' under: {UNSW_NB15_PATH}\n"
+            f"Could not find '{pattern}' under: {root}\n"
             "Make sure the files are inside datasets/unsw_nb15/."
         )
     return matches[0]
 
 
-def get_unsw_nb15(pct: float = DATA_PCT) -> pd.DataFrame:
+def get_unsw_nb15(
+    *,
+    unsw_dir: os.PathLike | str,
+    pct: float,
+    random_state: int,
+    logger: Any,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Load UNSW-NB15 training and testing CSVs and concatenate them.
+    Load UNSW-NB15 training and testing CSVs separately.
+
     Looks for:
-      - UNSW_NB15_training-set.csv
-      - UNSW_NB15_testing-set.csv
+      - UNSW_NB15_training-set.csv  -> returned as TRAIN POOL
+      - UNSW_NB15_testing-set.csv   -> returned as TEST
+
+    If pct < 1.0, stratified sampling by 'label' is applied to the TRAIN POOL ONLY
+    (so the official test set remains untouched).
     """
-    train_file = _find_first_csv("UNSW_NB15_training-set.csv")
-    test_file = _find_first_csv("UNSW_NB15_testing-set.csv")
+    root = Path(unsw_dir)
+    train_file = _find_first_csv(root, "UNSW_NB15_training-set.csv")
+    test_file = _find_first_csv(root, "UNSW_NB15_testing-set.csv")
 
     logger.info(f"Found training dataset in {train_file}")
     logger.info(f"Found testing dataset in {test_file}")
 
-    start = time.time()
+    t0 = time.time()
     df_train = pd.read_csv(train_file, engine="pyarrow", dtype_backend="pyarrow")
     df_test = pd.read_csv(test_file, engine="pyarrow", dtype_backend="pyarrow")
 
     df_train.columns = df_train.columns.astype(str).str.strip()
     df_test.columns = df_test.columns.astype(str).str.strip()
 
-    df = pd.concat([df_train, df_test], ignore_index=True)
+    if "label" not in df_train.columns:
+        raise ValueError(
+            "Expected 'label' column was not found in UNSW-NB15 TRAIN data."
+        )
+    if "label" not in df_test.columns:
+        raise ValueError(
+            "Expected 'label' column was not found in UNSW-NB15 TEST data."
+        )
 
-    if "label" not in df.columns:
-        raise ValueError("Expected 'label' column was not found in UNSW-NB15 data.")
-    df["label"] = df["label"].astype("object")
+    df_train["label"] = df_train["label"].astype("object")
+    df_test["label"] = df_test["label"].astype("object")
 
+    # Apply sampling ONLY to training set (keep test set intact)
     if pct < 1.0:
-        total_len = len(df)
-        target_n = max(1, int(round(total_len * pct)))
+        total_len = len(df_train)
+        target_n = max(1, int(round(total_len * float(pct))))
 
-        df = (
-            df.groupby("label", group_keys=False)
-            .sample(
-                frac=pct,
-                replace=False,
-                random_state=RANDOM_STATE,
-            )
+        out = (
+            df_train.groupby("label", group_keys=False)
+            .sample(frac=float(pct), replace=False, random_state=int(random_state))
             .reset_index(drop=True)
         )
 
-        # Correct any rounding drift
-        if len(df) > target_n:
-            df = df.sample(n=target_n, random_state=RANDOM_STATE).reset_index(drop=True)
+        if len(out) > target_n:
+            out = out.sample(n=target_n, random_state=int(random_state)).reset_index(
+                drop=True
+            )
 
+        df_train = out
         logger.info(
-            f"Returning stratified sample on 'label': "
-            f"{len(df)}/{total_len} rows (pct={pct})"
+            f"Returning stratified sample on TRAIN 'label': "
+            f"{len(df_train)}/{total_len} rows (pct={pct})"
         )
 
-    logger.info(f"Loaded datasets in {time.time() - start:.2f} seconds")
-    return df
+    logger.info(
+        f"Loaded datasets in {time.time() - t0:.2f}s | "
+        f"train={len(df_train)} test={len(df_test)}"
+    )
+    return df_train, df_test
 
 
-def clean_data_unsw(df: pd.DataFrame) -> pd.DataFrame:
+def preprocess_unsw_nb15(df: pd.DataFrame, *, logger: Any) -> pd.DataFrame:
     """
-    Hygiene-only cleaning for UNSW-NB15:
+    UNSW-specific hygiene-only preprocessing (kept from your original):
     - normalize column names
     - inf/-inf -> NA
     - placeholder strings -> NA for categorical-like columns
     - drop duplicate rows
     - drop 'id' if present
-    - ensure 'label' exists and is int
+    - ensure 'label' exists and is int64
     """
+    logger.info("Starting preprocessing of UNSW-NB15 dataset...")
+    t0 = time.time()
+
     df = df.copy()
     df.columns = df.columns.astype(str).str.strip()
 
-    df.replace([float("inf"), float("-inf")], np.nan, inplace=True)
+    df = df.replace([float("inf"), float("-inf")], np.nan)
+    df = df.infer_objects(copy=False)
 
     placeholder_values = {
         "-",
@@ -142,31 +139,23 @@ def clean_data_unsw(df: pd.DataFrame) -> pd.DataFrame:
         df[c] = s.where(~s.isin(list(placeholder_values)), np.nan)
 
     before = len(df)
-    df.drop_duplicates(inplace=True)
+    df = df.drop_duplicates()
     logger.info(f"Removed {before - len(df)} duplicate rows")
 
     if "id" in df.columns:
-        df.drop(columns=["id"], inplace=True)
+        df = df.drop(columns=["id"])
         logger.info("Dropped columns: ['id']")
 
     if "label" not in df.columns:
         raise ValueError("Target column 'label' not found in UNSW-NB15 dataset.")
     df["label"] = df["label"].astype("int64")
 
-    return df
-
-
-def preprocess_unsw_nb15(df: pd.DataFrame) -> pd.DataFrame:
-    """Apply hygiene-only preprocessing to UNSW-NB15."""
-    logger.info("Starting preprocessing of UNSW-NB15 dataset...")
-    start = time.time()
-    df = clean_data_unsw(df)
-    logger.info(f"Completed preprocessing in {time.time() - start:.2f} seconds")
+    logger.info(f"Completed preprocessing in {time.time() - t0:.2f}s")
     return df
 
 
 def _to_sklearn_nan(
-    df: pd.DataFrame, num_cols: List[str], cat_cols: List[str]
+    df: pd.DataFrame, *, num_cols: List[str], cat_cols: List[str]
 ) -> pd.DataFrame:
     """
     Convert Arrow / pandas nullable dtypes into sklearn-friendly numpy/object dtypes.
@@ -174,68 +163,38 @@ def _to_sklearn_nan(
     - Numeric columns -> float64 with np.nan
     - Categorical columns -> object with None for missing
 
-    This prevents: TypeError: boolean value of NA is ambiguous
+    Prevents: TypeError: boolean value of NA is ambiguous
     """
     out = df.copy()
 
-    # Numeric: force numpy float64 (np.nan for missing)
     for c in num_cols:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce").astype("float64")
 
-    # Categorical: force plain Python objects (None for missing)
     for c in cat_cols:
         if c in out.columns:
-            # Convert to object first (so missing can be represented sanely)
             out[c] = out[c].astype("object")
-            # Replace pandas NA / NaN with None (SimpleImputer treats None as missing for object)
             out[c] = out[c].where(pd.notna(out[c]), None)
 
     return out
 
 
-def _chronological_split(
-    X: pd.DataFrame, y: np.ndarray, test_size: float
-) -> Tuple[pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray]:
-    """Chronological split (no shuffle): first (1-test_size) train, last test_size test."""
-    if not (0.0 < test_size < 1.0):
-        raise ValueError(f"test_size must be in (0,1). Got {test_size}.")
-
-    split_idx = int(len(X) * (1.0 - test_size))
-    if split_idx <= 0 or split_idx >= len(X):
-        raise ValueError(
-            f"Bad split index {split_idx} for dataset length {len(X)} with test_size={test_size}."
-        )
-
-    X_train = X.iloc[:split_idx]
-    y_train = y[:split_idx]
-    X_test = X.iloc[split_idx:]
-    y_test = y[split_idx:]
-    return X_train, y_train, X_test, y_test
+def _infer_num_cat_cols(X: pd.DataFrame) -> Tuple[List[str], List[str]]:
+    cat_cols = X.select_dtypes(
+        include=["object", "string", "category"]
+    ).columns.tolist()
+    num_cols = X.select_dtypes(include=["number"]).columns.tolist()
+    return num_cols, cat_cols
 
 
-def _train_val_split_from_train(
-    X_train: pd.DataFrame, y_train: np.ndarray, val_fraction: float
-) -> Tuple[pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray]:
-    """From a chronological train set, take the last val_fraction as validation."""
-    if not (0.0 < val_fraction < 1.0):
-        raise ValueError(f"val_fraction must be in (0,1). Got {val_fraction}.")
-
-    split_idx = int(len(X_train) * (1.0 - val_fraction))
-    if split_idx <= 0 or split_idx >= len(X_train):
-        raise ValueError(
-            f"Bad split index {split_idx} for train length {len(X_train)} with val_fraction={val_fraction}."
-        )
-
-    X_tr = X_train.iloc[:split_idx]
-    y_tr = y_train[:split_idx]
-    X_val = X_train.iloc[split_idx:]
-    y_val = y_train[split_idx:]
-    return X_tr, y_tr, X_val, y_val
-
-
-def get_pipeline(num_cols: List[str], cat_cols: List[str]) -> ColumnTransformer:
-    """Preprocessing pipeline fit on train only and applied to validation."""
+def get_unsw_preprocessor(
+    *, num_cols: List[str], cat_cols: List[str]
+) -> ColumnTransformer:
+    """
+    UNSW-specific preprocessing pipeline (kept as the distinctive part):
+    - numeric: median impute + StandardScaler
+    - categorical: most_frequent impute + OneHotEncoder(handle_unknown='ignore')
+    """
     num_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="median")),
@@ -257,313 +216,224 @@ def get_pipeline(num_cols: List[str], cat_cols: List[str]) -> ColumnTransformer:
     )
 
 
-def process_holdout_data(
-    X_tr_raw: pd.DataFrame,
-    y_tr: ArrayLike,
-    X_val_raw: pd.DataFrame,
-    y_val: ArrayLike,
-    num_cols: List[str],
-    cat_cols: List[str],
-    random_state: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def preprocess_fit_transform(
+    X_train_raw: pd.DataFrame, X_other_raw: pd.DataFrame
+) -> Tuple[np.ndarray, np.ndarray, List[str], ColumnTransformer]:
     """
-    Holdout preprocessing (fit on train only, transform val):
-    - impute/scale numeric, impute/one-hot categorical
-    - variance threshold
-    - RF SelectFromModel top-K features
-    - SMOTE on training only
+    Fit UNSW preprocessor on TRAIN only, transform TRAIN + OTHER (val or test).
+    Returns:
+      X_tr_np, X_other_np, feature_names, fitted_preprocessor
     """
-    X_tr_raw = _to_sklearn_nan(X_tr_raw, num_cols=num_cols, cat_cols=cat_cols)
-    X_val_raw = _to_sklearn_nan(X_val_raw, num_cols=num_cols, cat_cols=cat_cols)
+    num_cols, cat_cols = _infer_num_cat_cols(X_train_raw)
 
-    pipeline = get_pipeline(num_cols, cat_cols)
+    X_tr = _to_sklearn_nan(X_train_raw, num_cols=num_cols, cat_cols=cat_cols)
+    X_ot = _to_sklearn_nan(X_other_raw, num_cols=num_cols, cat_cols=cat_cols)
 
-    X_tr = pipeline.fit_transform(X_tr_raw)
-    X_val = pipeline.transform(X_val_raw)
+    pre = get_unsw_preprocessor(num_cols=num_cols, cat_cols=cat_cols)
+    X_tr_np = pre.fit_transform(X_tr)
+    X_ot_np = pre.transform(X_ot)
 
-    vt = VarianceThreshold(threshold=VAR_THRESHOLD)
-    X_tr = vt.fit_transform(X_tr)
-    X_val = vt.transform(X_val)
+    # feature names (best-effort, used mostly for debugging; ML top-k uses indices)
+    names: List[str] = []
+    try:
+        names = list(pre.get_feature_names_out())
+    except Exception:
+        names = [f"f{i}" for i in range(int(X_tr_np.shape[1]))]
 
-    y_tr_arr = np.asarray(y_tr)
-
-    if len(np.unique(y_tr_arr)) > 1:
-        selector = SelectFromModel(
-            estimator=RandomForestClassifier(
-                n_estimators=GINI_N_ESTIMATORS, random_state=random_state, n_jobs=-1
-            ),
-            max_features=TOP_K_FEATURES,
-            threshold=-np.inf,
-        )
-        X_tr = selector.fit_transform(X_tr, y_tr_arr)
-        X_val = selector.transform(X_val)
-    else:
-        if X_tr.shape[1] > TOP_K_FEATURES:
-            X_tr = X_tr[:, :TOP_K_FEATURES]
-            X_val = X_val[:, :TOP_K_FEATURES]
-
-    if len(np.unique(y_tr_arr)) > 1:
-        smote = SMOTE(random_state=random_state, k_neighbors=SMOTE_K_NEIGHBORS)
-        X_tr, y_tr_arr = smote.fit_resample(X_tr, y_tr_arr)
-
-    return X_tr, y_tr_arr, X_val, np.asarray(y_val)
-
-
-def _prepare_unsw_splits(
-    df: pd.DataFrame,
-) -> Tuple[pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray, List[str], List[str]]:
-    """Build chronological 80/20 and 90/10 splits and return train/val plus column lists."""
-    if "label" not in df.columns:
-        raise ValueError("Target column 'label' not found.")
-
-    y_all = df["label"].values.astype(int)
-
-    drop_cols = ["label"]
-    if "attack_cat" in df.columns:
-        drop_cols.append("attack_cat")
-
-    X_all = df.drop(columns=drop_cols)
-
-    X_train, y_train, _, _ = _chronological_split(X_all, y_all, test_size=TEST_SIZE)
-    X_tr_raw, y_tr, X_val_raw, y_val = _train_val_split_from_train(
-        X_train, y_train, val_fraction=VAL_IN_TRAIN
+    return (
+        np.asarray(X_tr_np, dtype=np.float32),
+        np.asarray(X_ot_np, dtype=np.float32),
+        names,
+        pre,
     )
 
-    cat_cols = X_all.select_dtypes(
-        include=["object", "string", "category"]
-    ).columns.tolist()
-    num_cols = X_all.select_dtypes(include=["number"]).columns.tolist()
 
-    return X_tr_raw, y_tr, X_val_raw, y_val, num_cols, cat_cols
+def preprocess_transform(
+    X_raw: pd.DataFrame,
+    *,
+    fitted_preprocessor: ColumnTransformer,
+    train_num_cols: List[str],
+    train_cat_cols: List[str],
+) -> np.ndarray:
+    """
+    Transform-only path using a train-fitted preprocessor.
+    You must pass the TRAIN column lists (num/cat) so missing columns are handled consistently.
+    """
+    X_in = _to_sklearn_nan(X_raw, num_cols=train_num_cols, cat_cols=train_cat_cols)
+    X_np = fitted_preprocessor.transform(X_in)
+    return np.asarray(X_np, dtype=np.float32)
+
+
+def stratified_split(
+    X: pd.DataFrame,
+    y: np.ndarray,
+    *,
+    test_size: float,
+    random_state: int,
+) -> Tuple[pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray]:
+    """
+    CICIDS-style stratified split into train/test (no chronological constraint).
+    """
+    if not (0.0 < float(test_size) < 1.0):
+        raise ValueError(f"test_size must be in (0,1). Got {test_size}")
+
+    y = np.asarray(y, dtype=np.int64)
+    n = len(y)
+    if n < 2:
+        raise ValueError("Not enough samples to split.")
+
+    rng = np.random.default_rng(int(random_state))
+
+    idx_pos = np.flatnonzero(y == 1)
+    idx_neg = np.flatnonzero(y == 0)
+
+    n_pos_te = int(round(len(idx_pos) * float(test_size)))
+    n_neg_te = int(round(len(idx_neg) * float(test_size)))
+
+    if len(idx_pos) > 0:
+        n_pos_te = max(1, min(len(idx_pos) - 1 if len(idx_pos) > 1 else 1, n_pos_te))
+    if len(idx_neg) > 0:
+        n_neg_te = max(1, min(len(idx_neg) - 1 if len(idx_neg) > 1 else 1, n_neg_te))
+
+    te_pos = (
+        rng.choice(idx_pos, size=n_pos_te, replace=False)
+        if len(idx_pos)
+        else np.array([], dtype=np.int64)
+    )
+    te_neg = (
+        rng.choice(idx_neg, size=n_neg_te, replace=False)
+        if len(idx_neg)
+        else np.array([], dtype=np.int64)
+    )
+
+    te_idx = np.concatenate([te_pos, te_neg])
+    rng.shuffle(te_idx)
+
+    mask = np.ones(n, dtype=bool)
+    mask[te_idx] = False
+    tr_idx = np.flatnonzero(mask)
+
+    X_tr = X.iloc[tr_idx].reset_index(drop=True)
+    y_tr = y[tr_idx]
+    X_te = X.iloc[te_idx].reset_index(drop=True)
+    y_te = y[te_idx]
+    return X_tr, y_tr, X_te, y_te
+
+
+def stratified_holdout(
+    X: pd.DataFrame,
+    y: np.ndarray,
+    *,
+    val_frac: float,
+    random_state: int,
+) -> Tuple[pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray]:
+    """
+    Same helper you used for CICIDS: stratified validation holdout from a train pool.
+    """
+    if not (0.0 < float(val_frac) < 1.0):
+        raise ValueError(f"val_frac must be in (0,1). Got {val_frac}")
+
+    y = np.asarray(y, dtype=np.int64)
+    n = len(y)
+    if n < 2:
+        raise ValueError("Not enough samples to create holdout.")
+
+    rng = np.random.default_rng(int(random_state))
+
+    idx_pos = np.flatnonzero(y == 1)
+    idx_neg = np.flatnonzero(y == 0)
+
+    n_pos_val = int(round(len(idx_pos) * float(val_frac)))
+    n_neg_val = int(round(len(idx_neg) * float(val_frac)))
+
+    if len(idx_pos) > 0:
+        n_pos_val = max(1, min(len(idx_pos) - 1 if len(idx_pos) > 1 else 1, n_pos_val))
+    if len(idx_neg) > 0:
+        n_neg_val = max(1, min(len(idx_neg) - 1 if len(idx_neg) > 1 else 1, n_neg_val))
+
+    val_pos = (
+        rng.choice(idx_pos, size=n_pos_val, replace=False)
+        if len(idx_pos)
+        else np.array([], dtype=np.int64)
+    )
+    val_neg = (
+        rng.choice(idx_neg, size=n_neg_val, replace=False)
+        if len(idx_neg)
+        else np.array([], dtype=np.int64)
+    )
+
+    val_idx = np.concatenate([val_pos, val_neg])
+    rng.shuffle(val_idx)
+
+    mask = np.ones(n, dtype=bool)
+    mask[val_idx] = False
+    tr_idx = np.flatnonzero(mask)
+
+    X_tr2 = X.iloc[tr_idx].reset_index(drop=True)
+    y_tr2 = y[tr_idx]
+    X_val = X.iloc[val_idx].reset_index(drop=True)
+    y_val = y[val_idx]
+    return X_tr2, y_tr2, X_val, y_val
+
+
+def metrics_binary(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    """Same metrics helper as CICIDS."""
+    y_true = y_true.astype(np.int64)
+    y_pred = y_pred.astype(np.int64)
+
+    tp = int(((y_true == 1) & (y_pred == 1)).sum())
+    tn = int(((y_true == 0) & (y_pred == 0)).sum())
+    fp = int(((y_true == 0) & (y_pred == 1)).sum())
+    fn = int(((y_true == 1) & (y_pred == 0)).sum())
+
+    acc = (tp + tn) / max(1, tp + tn + fp + fn)
+    prec = tp / max(1, tp + fp)
+    rec = tp / max(1, tp + fn)
+    f1 = (2 * prec * rec) / max(1e-12, prec + rec)
+
+    return {
+        "f1": float(f1),
+        "accuracy": float(acc),
+        "precision": float(prec),
+        "recall": float(rec),
+    }
 
 
 def save_results(
-    study: optuna.Study,
+    *,
     model_name: str,
+    best_value: float,
+    best_metrics: Dict[str, float],
+    best_params: Dict[str, Any],
     n_trials: int,
-    n_splits: int,
     total_time: float,
-) -> dict:
-    """Save best params to JSON and write a detailed tuning log."""
-    avg_trial_time = total_time / n_trials if n_trials > 0 else 0.0
-    best_params = study.best_params
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir: os.PathLike | str,
+    logger: Any,
+) -> Dict[str, Any]:
+    """
+    CICIDS-style result writer (log file per model run).
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs(str(results_dir), exist_ok=True)
 
-    json_filename = f"UNSW_NB15_{model_name}_BestParams_{timestamp}.json"
-    with open(os.path.join(HYPERPARAMS_DIR, json_filename), "w") as f:
-        json.dump(best_params, f, indent=4)
-
-    log_filename = f"{model_name}_{timestamp}.log"
-    log_path = os.path.join(RESULTS_DIR, log_filename)
-
-    log_content: List[str] = [
+    log_path = os.path.join(str(results_dir), f"{model_name}_{ts}.log")
+    lines = [
         f"Model: {model_name}",
         "Dataset: UNSW_NB15",
+        "Split: Train/Val/Test via stratified split + stratified holdout",
         f"Date: {datetime.now().isoformat()}",
-        f"Trials: {n_trials} | CV Splits: {n_splits}",
+        f"Trials: {n_trials}",
         "-" * 60,
-        f"Total Tuning Time: {total_time:.2f}s",
-        f"Avg Trial Time: {avg_trial_time:.2f}s",
+        f"Total Time: {total_time:.2f}s",
         "-" * 60,
-        f"Best Validation F1: {study.best_value:.6f}",
-        f"Best Val Accuracy:  {study.best_trial.user_attrs.get('avg_accuracy', 0.0):.6f}",
-        f"Best Val Precision: {study.best_trial.user_attrs.get('avg_precision', 0.0):.6f}",
-        f"Best Val Recall:    {study.best_trial.user_attrs.get('avg_recall', 0.0):.6f}",
-        f"Best Hyperparameters:\n{json.dumps(best_params, indent=4)}",
-        "-" * 60,
-        "Trial History:",
+        f"Test F1: {best_value:.6f}",
+        f"Test Accuracy:  {best_metrics.get('accuracy', 0.0):.6f}",
+        f"Test Precision: {best_metrics.get('precision', 0.0):.6f}",
+        f"Test Recall:    {best_metrics.get('recall', 0.0):.6f}",
+        f"Params:\n{json.dumps(best_params, indent=4)}",
     ]
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
 
-    header = (
-        f"{'Trial':<6} | {'F1':<10} | {'Acc':<10} | {'Prec':<10} | "
-        f"{'Rec':<10} | {'State':<10} | {'Dur(s)':<10}"
-    )
-    log_content.append(header)
-    log_content.append("-" * len(header))
-
-    for t in study.trials:
-        dur = t.duration.total_seconds() if t.duration else 0.0
-        f1 = float(t.value) if t.value is not None else 0.0
-        acc = float(t.user_attrs.get("avg_accuracy", 0.0))
-        prec = float(t.user_attrs.get("avg_precision", 0.0))
-        rec = float(t.user_attrs.get("avg_recall", 0.0))
-        log_content.append(
-            f"{t.number:<6} | {f1:<10.6f} | {acc:<10.6f} | {prec:<10.6f} | "
-            f"{rec:<10.6f} | {t.state.name:<10} | {dur:<10.2f}"
-        )
-
-    with open(log_path, "w") as f:
-        f.write("\n".join(log_content))
-
-    logger.info(f"Tuning complete. Log saved to {log_path}")
-    logger.info(f"Total: {total_time:.2f}s | Avg Trial: {avg_trial_time:.2f}s")
+    logger.info(f"Saved log to {log_path}")
     return best_params
-
-
-def tune_unsw_nb15_dl(
-    model_class: Type[BaseDLModel], n_trials: int, random_state: int
-) -> Dict[str, Any]:
-    """DL tuning with chronological 80/20 and 90/10 splits, single validation objective."""
-    start_time = time.time()
-
-    df = get_unsw_nb15()
-    df = preprocess_unsw_nb15(df)
-
-    X_tr_raw, y_tr, X_val_raw, y_val, num_cols, cat_cols = _prepare_unsw_splits(df)
-
-    model_name = model_class.__name__
-    logger.info(
-        f"Starting DL Tuning for {model_name} (chronological 80/20 test, 90/10 val-in-train)..."
-    )
-
-    def objective(trial: optuna.Trial) -> float:
-        hp = model_class.sample_hyperparameters(trial)
-
-        lr = float(hp.pop("lr", hp.pop("learning_rate", 1e-3)))
-        optimizer_name = str(
-            hp.pop("optimizer_name", hp.pop("optimizer", "adam"))
-        ).lower()
-
-        X_tr, y_tr_bal, X_val, y_val_local = process_holdout_data(
-            X_tr_raw,
-            y_tr.astype(np.float32),
-            X_val_raw,
-            y_val.astype(np.float32),
-            num_cols=num_cols,
-            cat_cols=cat_cols,
-            random_state=random_state,
-        )
-
-        if len(np.unique(y_tr_bal)) < 2:
-            logger.warning(
-                f"Trial {trial.number}: Training set contains only 1 class after preprocessing. Returning 0.0."
-            )
-            return 0.0
-
-        train_loader = DataLoader(
-            TensorDataset(torch.FloatTensor(X_tr), torch.FloatTensor(y_tr_bal)),
-            batch_size=BATCH_SIZE,
-            shuffle=True,
-        )
-        val_loader = DataLoader(
-            TensorDataset(torch.FloatTensor(X_val), torch.FloatTensor(y_val_local)),
-            batch_size=BATCH_SIZE,
-            shuffle=False,
-        )
-
-        model = model_class(input_dim=X_tr.shape[1], **hp)
-
-        if optimizer_name == "adam":
-            opt = optim.Adam(model.parameters(), lr=lr)
-        elif optimizer_name == "rmsprop":
-            opt = optim.RMSprop(model.parameters(), lr=lr)
-        else:
-            opt = optim.SGD(model.parameters(), lr=lr, momentum=MOMENTUM)
-
-        m = model.train_model(
-            train_loader,
-            val_loader,
-            opt,
-            nn.BCELoss(),
-            epochs=EPOCHS,
-            patience=PATIENCE,
-        )
-
-        trial.set_user_attr("avg_accuracy", float(m.get("accuracy", 0.0)))
-        trial.set_user_attr("avg_precision", float(m.get("precision", 0.0)))
-        trial.set_user_attr("avg_recall", float(m.get("recall", 0.0)))
-
-        return float(m.get("f1", 0.0))
-
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction="maximize")
-    with tqdm(total=n_trials, desc=f"Optimizing {model_name}", unit="trial") as pbar:
-        study.optimize(
-            objective, n_trials=n_trials, callbacks=[lambda s, t: pbar.update(1)]
-        )
-
-    return save_results(
-        study, model_name, n_trials, n_splits=1, total_time=time.time() - start_time
-    )
-
-
-def tune_unsw_nb15_ml(
-    model_class: Type[BaseMLModel], n_trials: int, random_state: int
-) -> Dict[str, Any]:
-    """ML tuning with chronological 80/20 and 90/10 splits, single validation objective."""
-    start_time = time.time()
-
-    df = get_unsw_nb15()
-    df = preprocess_unsw_nb15(df)
-
-    X_tr_raw, y_tr, X_val_raw, y_val, num_cols, cat_cols = _prepare_unsw_splits(df)
-
-    model_name = model_class.__name__
-    logger.info(
-        f"Starting ML Tuning for {model_name} (chronological 80/20 test, 90/10 val-in-train)..."
-    )
-
-    def objective(trial: optuna.Trial) -> float:
-        hp = model_class.sample_hyperparameters(trial)
-
-        X_tr, y_tr_bal, X_val, y_val_local = process_holdout_data(
-            X_tr_raw,
-            y_tr,
-            X_val_raw,
-            y_val,
-            num_cols=num_cols,
-            cat_cols=cat_cols,
-            random_state=random_state,
-        )
-
-        if len(np.unique(y_tr_bal)) < 2:
-            logger.warning(
-                f"Trial {trial.number}: Training set contains only 1 class after preprocessing. Returning 0.0."
-            )
-            return 0.0
-
-        model = model_class(**hp)
-        m = model.train_model(X_tr, y_tr_bal, X_val, y_val_local)
-
-        trial.set_user_attr("avg_accuracy", float(m.get("accuracy", 0.0)))
-        trial.set_user_attr("avg_precision", float(m.get("precision", 0.0)))
-        trial.set_user_attr("avg_recall", float(m.get("recall", 0.0)))
-
-        return float(m.get("f1", 0.0))
-
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-    study = optuna.create_study(direction="maximize")
-    with tqdm(total=n_trials, desc=f"Optimizing {model_name}", unit="trial") as pbar:
-        study.optimize(
-            objective, n_trials=n_trials, callbacks=[lambda s, t: pbar.update(1)]
-        )
-
-    return save_results(
-        study, model_name, n_trials, n_splits=1, total_time=time.time() - start_time
-    )
-
-
-def tune_unsw_nb15(
-    model_class: Type[Any], n_trials: int, random_state: int
-) -> Dict[str, Any]:
-    """Route to DL or ML tuning function based on the model base class."""
-    if issubclass(model_class, BaseDLModel):
-        logger.info(f"Detected Deep Learning model: {model_class.__name__}")
-        return tune_unsw_nb15_dl(model_class, n_trials, random_state)
-
-    if issubclass(model_class, BaseMLModel):
-        logger.info(f"Detected ML model: {model_class.__name__}")
-        return tune_unsw_nb15_ml(model_class, n_trials, random_state)
-
-    raise ValueError(
-        f"Model class {model_class.__name__} must inherit from BaseDLModel or BaseMLModel."
-    )
-
-
-if __name__ == "__main__":
-    for model in MODEL_LIST:
-        tune_unsw_nb15(
-            model_class=model,
-            n_trials=N_TRIALS,
-            random_state=RANDOM_STATE,
-        )

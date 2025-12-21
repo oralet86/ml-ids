@@ -2,24 +2,22 @@ import pathlib
 import logging
 import os
 import sys
-from artifical_neural_network import ArtificialNeuralNetwork
-from lstm_model import LSTMModel
-from lstm_cnn_model import CNNLSTMModel
-from transformer import TransformerModel
-from transformer_158bit import Transformer158Model
 import traditional_models as tm
+import deep_models as dm
 
-# Helper list to run evals in a loop
-MODEL_LIST = [
-    Transformer158Model,
+# Helper lists to run evals in a loop
+DL_MODEL_LIST = [
+    dm.LSTMModel,
+    dm.CNNLSTMModel,
+    dm.FlowTransformerModel,
+    dm.ArtificialNeuralNetwork,
+]
+
+ML_MODEL_LIST = [
     tm.RandomForestModel,
     tm.XGBoostModel,
     tm.LightGBMModel,
     tm.CatBoostModel,
-    ArtificialNeuralNetwork,
-    LSTMModel,
-    CNNLSTMModel,
-    TransformerModel,
 ]
 
 # PATHS
